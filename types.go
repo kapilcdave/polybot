@@ -57,10 +57,12 @@ type MarketUpdate struct {
 }
 
 type Config struct {
-	KalshiAPIKeyID      string
+	KalshiAPIKeyID       string
 	KalshiPrivateKeyPath string
-	PolyAPIKey          string
-	ArbThreshold        float64
+	PolyAPIKey           string
+	PolyAPIKeyID         string
+	PolyAPISecret        string
+	ArbThreshold         float64
 }
 
 type MarketClient interface {
@@ -69,20 +71,20 @@ type MarketClient interface {
 }
 
 type DisplayRow struct {
-	Game        MatchedGame
+	Game          MatchedGame
 	Opportunities []ArbOpportunity
-	CombinedA   float64
-	CombinedB   float64
-	BestSpread  float64
+	CombinedA     float64
+	CombinedB     float64
+	BestSpread    float64
 }
 
 type DisplayState struct {
-	Now          time.Time
-	MatchedCount int
-	Rows         []DisplayRow
+	Now           time.Time
+	MatchedCount  int
+	Rows          []DisplayRow
 	Opportunities []ArbOpportunity
-	OppsSeen     int
-	LogPath      string
+	OppsSeen      int
+	LogPath       string
 }
 
 type SessionStats struct {
@@ -131,3 +133,9 @@ type tokenMapping struct {
 	Side     string
 }
 
+func (m MatchedGame) GameTime() time.Time {
+	if !m.Kalshi.GameTime.IsZero() {
+		return m.Kalshi.GameTime
+	}
+	return m.Poly.GameTime
+}

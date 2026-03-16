@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,9 +24,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const (
-	kalshiRESTBase = "https://api.elections.kalshi.com/trade-api/v2"
-	kalshiWSURL    = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+var (
+	kalshiRESTBases = []string{
+		"https://api.kalshi.com/trade-api/v2",
+		"https://api.elections.kalshi.com/trade-api/v2",
+	}
+	kalshiWSURLs = []string{
+		"wss://api.kalshi.com/trade-api/ws/v2",
+		"wss://api.elections.kalshi.com/trade-api/ws/v2",
+	}
 )
 
 type KalshiClient struct {
@@ -44,10 +51,11 @@ type KalshiClient struct {
 }
 
 func NewKalshiClient(apiKeyID, pemPath string) (*KalshiClient, error) {
-	data, err := os.ReadFile(pemPath)
+	resolvedPath := resolvePath(pemPath)
+	data, err := os.ReadFile(resolvedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("kalshi private key file not found: %s", pemPath)
+			return nil, fmt.Errorf("kalshi private key file not found: %s", resolvedPath)
 		}
 		return nil, fmt.Errorf("read kalshi private key: %w", err)
 	}
@@ -58,14 +66,14 @@ func NewKalshiClient(apiKeyID, pemPath string) (*KalshiClient, error) {
 	}
 
 	var privateKey *rsa.PrivateKey
-	if key, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes); parseErr == nil {
-		rsaKey, ok := key.(*rsa.PrivateKey)
+	if parsed, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes); parseErr == nil {
+		rsaKey, ok := parsed.(*rsa.PrivateKey)
 		if !ok {
 			return nil, fmt.Errorf("kalshi private key is not RSA")
 		}
 		privateKey = rsaKey
-	} else if key, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes); parseErr == nil {
-		privateKey = key
+	} else if parsed, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes); parseErr == nil {
+		privateKey = parsed
 	} else {
 		return nil, fmt.Errorf("parse kalshi private key: unsupported key format")
 	}
@@ -91,78 +99,71 @@ func (k *KalshiClient) WithContext(ctx context.Context) {
 }
 
 func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
-	req, err := http.NewRequestWithContext(k.ctx, http.MethodGet, kalshiRESTBase+"/markets?status=open&limit=200", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "gabagool-sports/1.0")
-	req.Header.Set("Accept", "application/json")
-
-	headers, err := k.authHeaders(http.MethodGet, "/trade-api/v2/markets?status=open&limit=200")
-	if err != nil {
-		return nil, err
-	}
-	for key, values := range headers {
-		for _, value := range values {
-			req.Header.Add(key, value)
+	var (
+		cursor  string
+		markets []SportsMarket
+		next    = make(map[string]SportsMarket)
+	)
+	for page := 0; page < 5; page++ {
+		path := "/trade-api/v2/markets?status=open&limit=200"
+		if cursor != "" {
+			path += "&cursor=" + cursor
 		}
-	}
 
-	resp, err := k.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("[kalshi] fetch sports markets: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("[kalshi] fetch sports markets status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var payload struct {
-		Markets []struct {
-			Ticker       string `json:"ticker"`
-			Title        string `json:"title"`
-			SeriesTicker string `json:"series_ticker"`
-			YesBid       int    `json:"yes_bid"`
-			NoBid        int    `json:"no_bid"`
-			YesAsk       int    `json:"yes_ask"`
-			NoAsk        int    `json:"no_ask"`
-			CloseTime    string `json:"close_time"`
-			Expiration   string `json:"expiration_time"`
-			OpenTime     string `json:"open_time"`
-		} `json:"markets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("[kalshi] decode sports markets: %w", err)
-	}
-
-	markets := make([]SportsMarket, 0, len(payload.Markets))
-	next := make(map[string]SportsMarket, len(payload.Markets))
-	for _, raw := range payload.Markets {
-		league := detectLeague(raw.SeriesTicker + " " + raw.Title)
-		if league == "" {
-			continue
+		resp, err := k.doAuthedGET(path)
+		if err != nil {
+			return nil, fmt.Errorf("[kalshi] fetch sports markets: %w", err)
 		}
-		home, away := parseTeams(raw.Title, league)
-		gameTime := parseTimeAny(raw.Expiration, raw.CloseTime, raw.OpenTime)
-		market := SportsMarket{
-			Platform:  "KALSHI",
-			MarketID:  raw.Ticker,
-			HomeTeam:  home,
-			AwayTeam:  away,
-			League:    league,
-			GameTime:  gameTime,
-			Question:  raw.Title,
-			YesBid:    float64(raw.YesBid) / 100,
-			NoBid:     float64(raw.NoBid) / 100,
-			YesAsk:    float64(raw.YesAsk) / 100,
-			NoAsk:     float64(raw.NoAsk) / 100,
-			UpdatedAt: time.Now().UTC(),
-			ClosesAt:  parseTimeAny(raw.CloseTime, raw.Expiration),
+
+		var payload struct {
+			Cursor  string `json:"cursor"`
+			Markets []struct {
+				Ticker       string      `json:"ticker"`
+				Title        string      `json:"title"`
+				SeriesTicker string      `json:"series_ticker"`
+				YesBid       interface{} `json:"yes_bid"`
+				NoBid        interface{} `json:"no_bid"`
+				YesAsk       interface{} `json:"yes_ask"`
+				NoAsk        interface{} `json:"no_ask"`
+				CloseTime    string      `json:"close_time"`
+				Expiration   string      `json:"expiration_time"`
+			} `json:"markets"`
 		}
-		markets = append(markets, market)
-		next[market.MarketID] = market
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("[kalshi] decode sports markets: %w", err)
+		}
+		resp.Body.Close()
+
+		for _, raw := range payload.Markets {
+			league := detectLeague(raw.SeriesTicker + " " + raw.Title + " " + raw.Ticker)
+			if league == "" {
+				continue
+			}
+			home, away := parseTeams(raw.Title, league)
+			market := SportsMarket{
+				Platform:  "KALSHI",
+				MarketID:  raw.Ticker,
+				HomeTeam:  home,
+				AwayTeam:  away,
+				League:    league,
+				GameTime:  parseTimeAny(raw.Expiration, raw.CloseTime),
+				Question:  raw.Title,
+				YesBid:    centsToFloat(raw.YesBid),
+				NoBid:     centsToFloat(raw.NoBid),
+				YesAsk:    centsToFloat(raw.YesAsk),
+				NoAsk:     centsToFloat(raw.NoAsk),
+				UpdatedAt: time.Now().UTC(),
+				ClosesAt:  parseTimeAny(raw.CloseTime, raw.Expiration),
+			}
+			markets = append(markets, market)
+			next[market.MarketID] = market
+		}
+
+		if payload.Cursor == "" || len(payload.Markets) == 0 {
+			break
+		}
+		cursor = payload.Cursor
 	}
 
 	k.mu.Lock()
@@ -171,14 +172,57 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 	return markets, nil
 }
 
+func (k *KalshiClient) doAuthedGET(path string) (*http.Response, error) {
+	var lastErr error
+	for _, base := range kalshiRESTBases {
+		req, err := http.NewRequestWithContext(k.ctx, http.MethodGet, base+strings.TrimPrefix(path, "/trade-api/v2"), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "gabagool-sports/1.0")
+		req.Header.Set("Accept", "application/json")
+
+		headers, err := k.authHeaders(http.MethodGet, path)
+		if err != nil {
+			return nil, err
+		}
+		for key, values := range headers {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+
+		resp, err := k.http.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			lastErr = fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
+}
+
 func parseTeams(title, league string) (home, away string) {
-	clean := strings.TrimSpace(title)
-	lower := strings.ToLower(clean)
+	raw := strings.TrimSpace(title)
+	lower := strings.ToLower(raw)
+	lower = strings.ReplaceAll(lower, "—", "-")
 
 	switch {
-	case strings.Contains(lower, " will the ") && strings.Contains(lower, " beat "):
-		afterWill := lower[strings.Index(lower, "will the ")+len("will the "):]
-		parts := strings.SplitN(afterWill, " beat ", 2)
+	case strings.HasPrefix(lower, "will the ") && strings.Contains(lower, " beat "):
+		after := strings.TrimPrefix(lower, "will the ")
+		parts := strings.SplitN(after, " beat ", 2)
+		if len(parts) == 2 {
+			return normalizeTeamNameWithLeague(parts[0], league), normalizeTeamNameWithLeague(strings.TrimSuffix(parts[1], "?"), league)
+		}
+	case strings.HasPrefix(lower, "will ") && strings.Contains(lower, " beat "):
+		after := strings.TrimPrefix(lower, "will ")
+		parts := strings.SplitN(after, " beat ", 2)
 		if len(parts) == 2 {
 			return normalizeTeamNameWithLeague(parts[0], league), normalizeTeamNameWithLeague(strings.TrimSuffix(parts[1], "?"), league)
 		}
@@ -188,18 +232,16 @@ func parseTeams(title, league string) (home, away string) {
 	case strings.Contains(lower, " vs "):
 		parts := strings.SplitN(lower, " vs ", 2)
 		return normalizeTeamNameWithLeague(parts[0], league), normalizeTeamNameWithLeague(parts[1], league)
-	case strings.Contains(lower, " @ "):
-		parts := strings.SplitN(lower, " @ ", 2)
-		return normalizeTeamNameWithLeague(parts[1], league), normalizeTeamNameWithLeague(parts[0], league)
+	case strings.Contains(lower, "@"):
+		parts := strings.SplitN(lower, "@", 2)
+		if len(parts) == 2 {
+			return normalizeTeamNameWithLeague(parts[1], league), normalizeTeamNameWithLeague(parts[0], league)
+		}
 	case strings.Contains(lower, " moneyline"):
 		return normalizeTeamNameWithLeague(strings.TrimSuffix(lower, " moneyline"), league), ""
 	}
 
-	words := strings.Fields(lower)
-	if len(words) > 0 {
-		return normalizeTeamNameWithLeague(strings.Join(words, " "), league), ""
-	}
-	return "", ""
+	return normalizeTeamNameWithLeague(lower, league), ""
 }
 
 func (k *KalshiClient) Connect() error {
@@ -210,10 +252,17 @@ func (k *KalshiClient) Connect() error {
 	headers.Set("User-Agent", "gabagool-sports/1.0")
 	headers.Set("Accept", "application/json")
 
-	conn, _, err := k.dialer.DialContext(k.ctx, kalshiWSURL, headers)
+	var conn *websocket.Conn
+	for _, wsURL := range kalshiWSURLs {
+		conn, _, err = k.dialer.DialContext(k.ctx, wsURL, headers)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("[kalshi] dial websocket: %w", err)
 	}
+	conn.SetReadLimit(1 << 20)
 
 	k.mu.Lock()
 	if k.conn != nil {
@@ -237,7 +286,7 @@ func (k *KalshiClient) SubscribeToMarkets(tickers []string) error {
 	for start := 0; start < len(tickers); start += 50 {
 		end := minInt(start+50, len(tickers))
 		payload := map[string]any{
-			"id":  1,
+			"id":  1 + (start / 50),
 			"cmd": "subscribe",
 			"params": map[string]any{
 				"channels":       []string{"ticker"},
@@ -281,15 +330,11 @@ func (k *KalshiClient) Listen(out chan<- MarketUpdate) {
 			continue
 		}
 
-		var message struct {
-			Type   string `json:"type"`
-			Market string `json:"market_ticker"`
-			YesBid int    `json:"yes_bid"`
-			NoBid  int    `json:"no_bid"`
-			YesAsk int    `json:"yes_ask"`
-			NoAsk  int    `json:"no_ask"`
+		var envelope struct {
+			Type string          `json:"type"`
+			Msg  json.RawMessage `json:"msg"`
 		}
-		if err := conn.ReadJSON(&message); err != nil {
+		if err := conn.ReadJSON(&envelope); err != nil {
 			log.Printf("[kalshi] websocket read error: %v", err)
 			k.closeConn()
 			if !sleepContext(k.ctx, backoff) {
@@ -298,31 +343,62 @@ func (k *KalshiClient) Listen(out chan<- MarketUpdate) {
 			backoff = minDuration(backoff*2, 30*time.Second)
 			continue
 		}
-		backoff = time.Second
-		if message.Type != "ticker" || message.Market == "" {
+		if envelope.Type != "ticker" {
+			continue
+		}
+
+		var msg struct {
+			MarketTicker string  `json:"market_ticker"`
+			YesBid       int     `json:"yes_bid"`
+			NoBid        int     `json:"no_bid"`
+			YesAsk       int     `json:"yes_ask"`
+			NoAsk        int     `json:"no_ask"`
+			YesBidDollar float64 `json:"yes_bid_dollars"`
+			NoBidDollar  float64 `json:"no_bid_dollars"`
+			YesAskDollar float64 `json:"yes_ask_dollars"`
+			NoAskDollar  float64 `json:"no_ask_dollars"`
+		}
+		if err := json.Unmarshal(envelope.Msg, &msg); err != nil {
+			log.Printf("[kalshi] decode ticker message: %v", err)
+			continue
+		}
+		if msg.MarketTicker == "" {
 			continue
 		}
 
 		k.mu.Lock()
-		market, ok := k.markets[message.Market]
+		market, ok := k.markets[msg.MarketTicker]
 		if !ok {
 			k.mu.Unlock()
 			continue
 		}
-		if message.YesBid > 0 {
-			market.YesBid = float64(message.YesBid) / 100
+
+		switch {
+		case msg.YesBidDollar > 0:
+			market.YesBid = msg.YesBidDollar
+		case msg.YesBid > 0:
+			market.YesBid = float64(msg.YesBid) / 100
 		}
-		if message.NoBid > 0 {
-			market.NoBid = float64(message.NoBid) / 100
+		switch {
+		case msg.NoBidDollar > 0:
+			market.NoBid = msg.NoBidDollar
+		case msg.NoBid > 0:
+			market.NoBid = float64(msg.NoBid) / 100
 		}
-		if message.YesAsk > 0 {
-			market.YesAsk = float64(message.YesAsk) / 100
+		switch {
+		case msg.YesAskDollar > 0:
+			market.YesAsk = msg.YesAskDollar
+		case msg.YesAsk > 0:
+			market.YesAsk = float64(msg.YesAsk) / 100
 		}
-		if message.NoAsk > 0 {
-			market.NoAsk = float64(message.NoAsk) / 100
+		switch {
+		case msg.NoAskDollar > 0:
+			market.NoAsk = msg.NoAskDollar
+		case msg.NoAsk > 0:
+			market.NoAsk = float64(msg.NoAsk) / 100
 		}
 		market.UpdatedAt = time.Now().UTC()
-		k.markets[message.Market] = market
+		k.markets[msg.MarketTicker] = market
 		k.mu.Unlock()
 
 		select {
@@ -334,19 +410,19 @@ func (k *KalshiClient) Listen(out chan<- MarketUpdate) {
 }
 
 func (k *KalshiClient) authHeaders(method, path string) (http.Header, error) {
-	ts := fmt.Sprintf("%d", time.Now().UnixMilli())
-	message := ts + method + path
-	hash := sha256.Sum256([]byte(message))
-	signature, err := rsa.SignPSS(rand.Reader, k.key, crypto.SHA256, hash[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	message := timestamp + method + path
+	sum := sha256.Sum256([]byte(message))
+	sig, err := rsa.SignPSS(rand.Reader, k.key, crypto.SHA256, sum[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
 	if err != nil {
 		return nil, fmt.Errorf("sign kalshi request: %w", err)
 	}
 
-	header := make(http.Header)
-	header.Set("KALSHI-ACCESS-KEY", k.apiKeyID)
-	header.Set("KALSHI-ACCESS-SIGNATURE", base64.StdEncoding.EncodeToString(signature))
-	header.Set("KALSHI-ACCESS-TIMESTAMP", ts)
-	return header, nil
+	headers := make(http.Header)
+	headers.Set("KALSHI-ACCESS-KEY", k.apiKeyID)
+	headers.Set("KALSHI-ACCESS-SIGNATURE", base64.StdEncoding.EncodeToString(sig))
+	headers.Set("KALSHI-ACCESS-TIMESTAMP", timestamp)
+	return headers, nil
 }
 
 func (k *KalshiClient) reconnect() error {
@@ -372,15 +448,15 @@ func (k *KalshiClient) closeConn() {
 }
 
 func normalizeTeamNameWithLeague(name, league string) string {
-	normalized := normalizeTeamName(name)
+	name = strings.TrimSpace(name)
 	if league == "NCAAB" {
-		return strings.ToLower(strings.TrimSpace(name))
+		return strings.ToLower(strings.Join(strings.Fields(name), " "))
 	}
-	return normalized
+	return normalizeTeamName(name)
 }
 
-func detectLeague(s string) string {
-	upper := strings.ToUpper(s)
+func detectLeague(value string) string {
+	upper := strings.ToUpper(value)
 	for _, league := range []string{"NBA", "NHL", "MLB", "NCAAB", "NFL"} {
 		if strings.Contains(upper, league) {
 			return league
@@ -393,6 +469,7 @@ func parseTimeAny(values ...string) time.Time {
 	layouts := []string{
 		time.RFC3339,
 		"2006-01-02T15:04:05.000Z",
+		"2006-01-02T15:04:05Z",
 		"2006-01-02 15:04:05",
 	}
 	for _, value := range values {
@@ -409,12 +486,36 @@ func parseTimeAny(values ...string) time.Time {
 	return time.Time{}
 }
 
+func centsToFloat(v interface{}) float64 {
+	switch x := v.(type) {
+	case float64:
+		if x > 1 {
+			return x / 100
+		}
+		return x
+	case int:
+		return float64(x) / 100
+	case string:
+		f, err := strconv.ParseFloat(x, 64)
+		if err != nil {
+			return 0
+		}
+		if f > 1 {
+			return f / 100
+		}
+		return f
+	default:
+		return 0
+	}
+}
+
 func resolvePath(path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}
-	if abs, err := filepath.Abs(path); err == nil {
-		return abs
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
 	}
-	return path
+	return abs
 }

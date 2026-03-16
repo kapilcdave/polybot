@@ -45,10 +45,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("[poly] fetch markets: %v", err)
 	}
+	log.Printf("[kalshi] discovered %d sports markets", len(kalshiMarkets))
+	log.Printf("[poly] discovered %d sports markets", len(polyMarkets))
 
 	matcher := NewGameMatcher()
 	matcher.Refresh("KALSHI", kalshiMarkets)
 	matcher.Refresh("POLY", polyMarkets)
+	log.Printf("[matcher] initial matches: %d", len(matcher.GetAllMatches()))
 
 	if err := kalshi.SubscribeToMarkets(extractMarketIDs(kalshiMarkets)); err != nil {
 		log.Printf("[kalshi] subscribe failed: %v", err)

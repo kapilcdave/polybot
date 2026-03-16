@@ -5,7 +5,7 @@ import "time"
 const (
 	KalshiFeePct = 0.07
 	PolyFeeFlat  = 0.001
-	ArbThreshold = 0.95
+	ArbThreshold = 0.93
 )
 
 var activeArbThreshold = ArbThreshold
@@ -18,13 +18,20 @@ func Check(game MatchedGame) []ArbOpportunity {
 	now := time.Now().UTC()
 	opps := make([]ArbOpportunity, 0, 2)
 
-	checkDirection := func(direction, yesPlatform, noPlatform string, yesPrice, noPrice, kalshiPrice, polyPrice float64) {
+	if game.GameTime().IsZero() || now.After(game.GameTime()) {
+		return opps
+	}
+
+	checkDirection := func(direction, yesPlatform string, yesPrice float64, noPlatform string, noPrice float64, kPrice float64, pPrice float64) {
+		if yesPrice <= 0 || noPrice <= 0 {
+			return
+		}
 		combined := yesPrice + noPrice
 		if combined >= activeArbThreshold {
 			return
 		}
-		kFee := kalshiFee(kalshiPrice)
-		pFee := polyPrice * PolyFeeFlat
+		kFee := kalshiFee(kPrice)
+		pFee := pPrice * PolyFeeFlat
 		gross := 1.0 - combined
 		net := gross - kFee - pFee
 		if net <= 0 {
@@ -43,12 +50,11 @@ func Check(game MatchedGame) []ArbOpportunity {
 			PolyFee:     pFee,
 			NetProfit:   net,
 			SeenAt:      now,
-			ExpiresAt:   game.Kalshi.GameTime,
+			ExpiresAt:   game.GameTime(),
 		})
 	}
 
-	checkDirection("K_YES+P_NO", "KALSHI", "POLY", game.Kalshi.YesBid, game.Poly.NoBid, game.Kalshi.YesBid, game.Poly.NoBid)
-	checkDirection("K_NO+P_YES", "POLY", "KALSHI", game.Poly.YesBid, game.Kalshi.NoBid, game.Kalshi.NoBid, game.Poly.YesBid)
-
+	checkDirection("K_YES+P_NO", "KALSHI", game.Kalshi.YesBid, "POLY", game.Poly.NoBid, game.Kalshi.YesBid, game.Poly.NoBid)
+	checkDirection("K_NO+P_YES", "POLY", game.Poly.YesBid, "KALSHI", game.Kalshi.NoBid, game.Kalshi.NoBid, game.Poly.YesBid)
 	return opps
 }

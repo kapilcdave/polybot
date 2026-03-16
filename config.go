@@ -39,6 +39,10 @@ func LoadConfig(path string) (Config, error) {
 			cfg.KalshiPrivateKeyPath = value
 		case "POLY_API_KEY":
 			cfg.PolyAPIKey = value
+		case "POLY_API_KEY_ID":
+			cfg.PolyAPIKeyID = value
+		case "POLY_API_SECRET":
+			cfg.PolyAPISecret = value
 		case "ARB_THRESHOLD":
 			parsed, parseErr := strconv.ParseFloat(value, 64)
 			if parseErr != nil {

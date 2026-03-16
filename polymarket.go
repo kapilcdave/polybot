@@ -30,8 +30,8 @@ type PolyClient struct {
 	conn         *websocket.Conn
 	markets      map[string]SportsMarket
 	tokenMap     map[string]tokenMapping
-	subscribed   []string
 	marketTokens map[string][2]string
+	subscribed   []string
 
 	writeMu sync.Mutex
 }
@@ -58,81 +58,105 @@ func (p *PolyClient) WithContext(ctx context.Context) {
 }
 
 func (p *PolyClient) FetchSportsMarkets() ([]SportsMarket, error) {
-	tags := []string{"sports", "nba", "nhl", "mlb", "ncaa"}
 	collected := make(map[string]SportsMarket)
 	tokenMap := make(map[string]tokenMapping)
 	marketTokens := make(map[string][2]string)
 
-	for _, tag := range tags {
-		url := fmt.Sprintf("%s/markets?tag=%s&active=true&limit=200", polyGammaAPI, tag)
-		req, err := http.NewRequestWithContext(p.ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("User-Agent", "gabagool-sports/1.0")
-		req.Header.Set("Accept", "application/json")
+	req, err := http.NewRequestWithContext(p.ctx, http.MethodGet, polyGammaAPI+"/markets?active=true&closed=false&limit=1000", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "gabagool-sports/1.0")
+	req.Header.Set("Accept", "application/json")
 
-		resp, err := p.http.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("[poly] fetch sports markets tag=%s: %w", tag, err)
-		}
-		if resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
-			return nil, fmt.Errorf("[poly] fetch sports markets tag=%s status=%d body=%s", tag, resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-
-		var payload []struct {
-			ID           string          `json:"id"`
-			Question     string          `json:"question"`
-			Active       bool            `json:"active"`
-			Closed       bool            `json:"closed"`
-			EndDate      string          `json:"endDate"`
-			GameStart    string          `json:"gameStartTime"`
-			Slug         string          `json:"slug"`
-			Tags         []string        `json:"tags"`
-			Outcomes     json.RawMessage `json:"outcomes"`
-			CLOBTokenIDs json.RawMessage `json:"clobTokenIds"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("[poly] decode sports markets tag=%s: %w", tag, err)
-		}
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("[poly] fetch sports markets: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
+		return nil, fmt.Errorf("[poly] fetch sports markets status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
-		for _, raw := range payload {
-			if !raw.Active || raw.Closed {
-				continue
-			}
-			tokenIDs := parseTokenIDs(raw.CLOBTokenIDs)
-			if len(tokenIDs) < 2 {
-				continue
-			}
-			league := detectLeague(raw.Question + " " + raw.Slug + " " + strings.Join(raw.Tags, " "))
-			if league == "" && tag == "ncaa" {
-				league = "NCAAB"
-			}
-			if league == "" {
-				continue
-			}
+	var payload []struct {
+		ID            string          `json:"id"`
+		Question      string          `json:"question"`
+		Slug          string          `json:"slug"`
+		Active        bool            `json:"active"`
+		Closed        bool            `json:"closed"`
+		EndDate       string          `json:"endDate"`
+		GameStart     string          `json:"gameStartTime"`
+		BestBid       interface{}     `json:"bestBid"`
+		BestAsk       interface{}     `json:"bestAsk"`
+		OutcomePrices json.RawMessage `json:"outcomePrices"`
+		ClobTokenIDs  json.RawMessage `json:"clobTokenIds"`
+		Events        []struct {
+			Title string `json:"title"`
+			Slug  string `json:"slug"`
+		} `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		resp.Body.Close()
+		return nil, fmt.Errorf("[poly] decode sports markets: %w", err)
+	}
+	resp.Body.Close()
 
-			home, away := parseTeams(raw.Question, league)
-			market := SportsMarket{
-				Platform:  "POLY",
-				MarketID:  raw.ID,
-				HomeTeam:  home,
-				AwayTeam:  away,
-				League:    league,
-				GameTime:  parseTimeAny(raw.GameStart, raw.EndDate),
-				Question:  raw.Question,
-				UpdatedAt: time.Now().UTC(),
-				ClosesAt:  parseTimeAny(raw.EndDate),
-			}
-			collected[market.MarketID] = market
-			tokenMap[tokenIDs[0]] = tokenMapping{MarketID: market.MarketID, Side: "YES"}
-			tokenMap[tokenIDs[1]] = tokenMapping{MarketID: market.MarketID, Side: "NO"}
-			marketTokens[market.MarketID] = [2]string{tokenIDs[0], tokenIDs[1]}
+	for _, raw := range payload {
+		if !raw.Active || raw.Closed {
+			continue
 		}
+		tokenIDs := parseTokenIDs(raw.ClobTokenIDs)
+		if len(tokenIDs) < 2 {
+			continue
+		}
+
+		contextText := raw.Question + " " + raw.Slug
+		for _, event := range raw.Events {
+			contextText += " " + event.Title + " " + event.Slug
+		}
+
+		league := detectLeague(contextText)
+		if league == "" && !looksLikeSportsQuestion(contextText, raw.GameStart) {
+			continue
+		}
+		if league == "" {
+			league = inferLeagueFromTeams(contextText)
+		}
+		if league == "" {
+			continue
+		}
+
+		home, away := parseTeams(raw.Question, league)
+		yesPrice, noPrice := parseOutcomePrices(raw.OutcomePrices)
+		bestBid := normalizePolyPrice(floatValue(raw.BestBid))
+		bestAsk := normalizePolyPrice(floatValue(raw.BestAsk))
+		if bestBid > 0 {
+			yesPrice = bestBid
+		}
+		if noPrice == 0 && bestAsk > 0 {
+			noPrice = maxFloat(0, 1-bestAsk)
+		}
+
+		market := SportsMarket{
+			Platform:  "POLY",
+			MarketID:  raw.ID,
+			HomeTeam:  home,
+			AwayTeam:  away,
+			League:    league,
+			GameTime:  parseTimeAny(raw.GameStart, raw.EndDate),
+			Question:  raw.Question,
+			YesBid:    normalizePolyPrice(yesPrice),
+			NoBid:     normalizePolyPrice(noPrice),
+			YesAsk:    bestAsk,
+			NoAsk:     maxFloat(0, 1-bestBid),
+			UpdatedAt: time.Now().UTC(),
+			ClosesAt:  parseTimeAny(raw.EndDate, raw.GameStart),
+		}
+		collected[market.MarketID] = market
+		tokenMap[tokenIDs[0]] = tokenMapping{MarketID: market.MarketID, Side: "YES"}
+		tokenMap[tokenIDs[1]] = tokenMapping{MarketID: market.MarketID, Side: "NO"}
+		marketTokens[market.MarketID] = [2]string{tokenIDs[0], tokenIDs[1]}
 	}
 
 	out := make([]SportsMarket, 0, len(collected))
@@ -156,6 +180,7 @@ func (p *PolyClient) Connect() error {
 	if err != nil {
 		return fmt.Errorf("[poly] dial websocket: %w", err)
 	}
+	conn.SetReadLimit(2 << 20)
 
 	p.mu.Lock()
 	if p.conn != nil {
@@ -179,8 +204,9 @@ func (p *PolyClient) Subscribe(tokenIDs []string) error {
 	for start := 0; start < len(tokenIDs); start += 100 {
 		end := minInt(start+100, len(tokenIDs))
 		payload := map[string]any{
-			"type":      "market",
-			"assets_ids": tokenIDs[start:end],
+			"assets_ids":             tokenIDs[start:end],
+			"type":                   "market",
+			"custom_feature_enabled": true,
 		}
 		p.writeMu.Lock()
 		err := conn.WriteJSON(payload)
@@ -219,8 +245,8 @@ func (p *PolyClient) Listen(out chan<- MarketUpdate) {
 			continue
 		}
 
-		var raw map[string]any
-		if err := conn.ReadJSON(&raw); err != nil {
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
 			log.Printf("[poly] websocket read error: %v", err)
 			p.closeConn()
 			if !sleepContext(p.ctx, backoff) {
@@ -230,39 +256,93 @@ func (p *PolyClient) Listen(out chan<- MarketUpdate) {
 			continue
 		}
 		backoff = time.Second
-		p.handleMessage(raw, out)
+		p.handleRaw(payload, out)
 	}
 }
 
-func (p *PolyClient) handleMessage(raw map[string]any, out chan<- MarketUpdate) {
-	eventType := stringValue(raw["event_type"])
-	switch eventType {
+func (p *PolyClient) TokenIDs() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make([]string, 0, len(p.tokenMap))
+	for tokenID := range p.tokenMap {
+		out = append(out, tokenID)
+	}
+	return out
+}
+
+func (p *PolyClient) handleRaw(raw []byte, out chan<- MarketUpdate) {
+	var list []json.RawMessage
+	if err := json.Unmarshal(raw, &list); err == nil {
+		for _, item := range list {
+			p.handleMessage(item, out)
+		}
+		return
+	}
+	if !json.Valid(raw) {
+		log.Printf("[poly] non-json frame: %s", strings.TrimSpace(string(raw)))
+		return
+	}
+	p.handleMessage(raw, out)
+}
+
+func (p *PolyClient) handleMessage(raw json.RawMessage, out chan<- MarketUpdate) {
+	var envelope struct {
+		EventType string          `json:"event_type"`
+		AssetID   string          `json:"asset_id"`
+		Bids      json.RawMessage `json:"bids"`
+		BestBid   interface{}     `json:"best_bid"`
+		Changes   []struct {
+			AssetID string      `json:"asset_id"`
+			Price   interface{} `json:"price"`
+			BestBid interface{} `json:"best_bid"`
+		} `json:"price_changes"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		log.Printf("[poly] decode websocket message: %v", err)
+		return
+	}
+
+	switch envelope.EventType {
 	case "price_change":
-		tokenID := stringValue(raw["asset_id"])
-		bestBid := floatValue(raw["best_bid"])
-		p.applyTokenUpdate(tokenID, bestBid, out)
+		for _, change := range envelope.Changes {
+			price := bestAvailableFloat(change.BestBid, change.Price)
+			if price > 0 {
+				p.applyTokenUpdate(change.AssetID, price, out)
+			}
+		}
 	case "book":
-		tokenID := stringValue(raw["asset_id"])
-		bids, _ := raw["bids"].([]any)
-		if len(bids) == 0 {
+		var bids []struct {
+			Price interface{} `json:"price"`
+		}
+		if err := json.Unmarshal(envelope.Bids, &bids); err != nil {
 			return
 		}
-		bid, _ := bids[0].(map[string]any)
-		bestBid := floatValue(bid["price"])
-		p.applyTokenUpdate(tokenID, bestBid, out)
+		if len(bids) > 0 {
+			p.applyTokenUpdate(envelope.AssetID, floatValue(bids[0].Price), out)
+		}
+	case "best_bid_ask":
+		price := floatValue(envelope.BestBid)
+		if price > 0 {
+			p.applyTokenUpdate(envelope.AssetID, price, out)
+		}
 	}
 }
 
 func (p *PolyClient) applyTokenUpdate(tokenID string, bestBid float64, out chan<- MarketUpdate) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if tokenID == "" || bestBid <= 0 {
+		return
+	}
 
+	p.mu.Lock()
 	mapping, ok := p.tokenMap[tokenID]
 	if !ok {
+		p.mu.Unlock()
 		return
 	}
 	market, ok := p.markets[mapping.MarketID]
 	if !ok {
+		p.mu.Unlock()
 		return
 	}
 
@@ -276,6 +356,7 @@ func (p *PolyClient) applyTokenUpdate(tokenID string, bestBid float64, out chan<
 	}
 	market.UpdatedAt = time.Now().UTC()
 	p.markets[mapping.MarketID] = market
+	p.mu.Unlock()
 
 	select {
 	case out <- MarketUpdate{Platform: "POLY", Market: market}:
@@ -305,21 +386,12 @@ func (p *PolyClient) closeConn() {
 	}
 }
 
-func (p *PolyClient) TokenIDs() []string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	out := make([]string, 0, len(p.tokenMap))
-	for tokenID := range p.tokenMap {
-		out = append(out, tokenID)
-	}
-	return out
-}
-
 func parseTokenIDs(raw json.RawMessage) []string {
 	var direct []string
 	if err := json.Unmarshal(raw, &direct); err == nil {
 		return direct
 	}
+
 	var encoded string
 	if err := json.Unmarshal(raw, &encoded); err == nil {
 		encoded = strings.TrimSpace(encoded)
@@ -337,28 +409,90 @@ func parseTokenIDs(raw json.RawMessage) []string {
 	return nil
 }
 
-func stringValue(v any) string {
+func floatValue(v interface{}) float64 {
 	switch x := v.(type) {
-	case string:
+	case float64:
 		return x
-	case fmt.Stringer:
-		return x.String()
+	case string:
+		f, err := strconv.ParseFloat(x, 64)
+		if err != nil {
+			return 0
+		}
+		return f
+	case json.Number:
+		f, err := x.Float64()
+		if err != nil {
+			return 0
+		}
+		return f
+	default:
+		return 0
+	}
+}
+
+func bestAvailableFloat(values ...interface{}) float64 {
+	for _, value := range values {
+		if price := floatValue(value); price > 0 {
+			return price
+		}
+	}
+	return 0
+}
+
+func parseOutcomePrices(raw json.RawMessage) (float64, float64) {
+	var prices []string
+	if err := json.Unmarshal(raw, &prices); err == nil && len(prices) >= 2 {
+		return normalizePolyPrice(floatValue(prices[0])), normalizePolyPrice(floatValue(prices[1]))
+	}
+	return 0, 0
+}
+
+func looksLikeSportsQuestion(text, gameStart string) bool {
+	s := strings.ToLower(text)
+	if strings.TrimSpace(gameStart) != "" {
+		return true
+	}
+	return strings.Contains(s, " vs ") ||
+		strings.Contains(s, " vs. ") ||
+		strings.Contains(s, " @ ") ||
+		strings.Contains(s, " finals") ||
+		strings.Contains(s, " conference") ||
+		strings.Contains(s, " stanley cup") ||
+		strings.Contains(s, " world series") ||
+		strings.Contains(s, "march madness")
+}
+
+func inferLeagueFromTeams(text string) string {
+	s := strings.ToLower(text)
+	switch {
+	case strings.Contains(s, "stanley cup"), strings.Contains(s, "nhl"):
+		return "NHL"
+	case strings.Contains(s, "world series"), strings.Contains(s, "mlb"):
+		return "MLB"
+	case strings.Contains(s, "ncaa"), strings.Contains(s, "march madness"), strings.Contains(s, "final four"):
+		return "NCAAB"
+	case strings.Contains(s, "nba"), strings.Contains(s, "western conference"), strings.Contains(s, "eastern conference"):
+		return "NBA"
+	case strings.Contains(s, "nfl"), strings.Contains(s, "super bowl"):
+		return "NFL"
 	default:
 		return ""
 	}
 }
 
-func floatValue(v any) float64 {
-	switch x := v.(type) {
-	case float64:
-		return x
-	case string:
-		f, _ := strconv.ParseFloat(x, 64)
-		return f
-	case json.Number:
-		f, _ := x.Float64()
-		return f
-	default:
+func normalizePolyPrice(v float64) float64 {
+	if v <= 0 {
 		return 0
 	}
+	if v > 1 {
+		return v / 100
+	}
+	return v
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
