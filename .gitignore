@@ -1,0 +1,9 @@
+.env
+polybot.txt
+*.pem
+sports_arb_log.csv
+bin/
+dist/
+*.exe
+*.out
+*.test
