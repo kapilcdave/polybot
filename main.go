@@ -30,13 +30,6 @@ func main() {
 	poly := NewPolyClient()
 	poly.WithContext(ctx)
 
-	if err := kalshi.Connect(); err != nil {
-		log.Printf("[kalshi] initial websocket connect failed: %v", err)
-	}
-	if err := poly.Connect(); err != nil {
-		log.Printf("[poly] initial websocket connect failed: %v", err)
-	}
-
 	kalshiMarkets, err := kalshi.FetchSportsMarkets()
 	if err != nil {
 		log.Fatalf("[kalshi] fetch markets: %v", err)
@@ -47,6 +40,13 @@ func main() {
 	}
 	log.Printf("[kalshi] discovered %d sports markets", len(kalshiMarkets))
 	log.Printf("[poly] discovered %d sports markets", len(polyMarkets))
+
+	if err := kalshi.Connect(); err != nil {
+		log.Printf("[kalshi] initial websocket connect failed: %v", err)
+	}
+	if err := poly.Connect(); err != nil {
+		log.Printf("[poly] initial websocket connect failed: %v", err)
+	}
 
 	matcher := NewGameMatcher()
 	matcher.Refresh("KALSHI", kalshiMarkets)

@@ -195,6 +195,7 @@ func (p *PolyClient) Connect() error {
 	}
 	p.conn = conn
 	p.mu.Unlock()
+	go p.pingLoop(conn)
 	return nil
 }
 
@@ -218,8 +219,8 @@ func (p *PolyClient) Subscribe(tokenIDs []string) error {
 			payload["type"] = "market"
 			payload["custom_feature_enabled"] = true
 		} else {
-			payload["event_type"] = "subscribe"
-			payload["type"] = "market"
+			payload["operation"] = "subscribe"
+			payload["custom_feature_enabled"] = true
 		}
 		p.writeMu.Lock()
 		err := conn.WriteJSON(payload)
@@ -257,6 +258,8 @@ func (p *PolyClient) Listen(out chan<- MarketUpdate) {
 			backoff = time.Second
 			continue
 		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -388,11 +391,34 @@ func (p *PolyClient) reconnect() error {
 	}
 	p.mu.RLock()
 	subs := append([]string(nil), p.subscribed...)
+	conn := p.conn
 	p.mu.RUnlock()
+	if conn != nil {
+		go p.pingLoop(conn)
+	}
 	if len(subs) > 0 {
 		return p.Subscribe(subs)
 	}
 	return nil
+}
+
+func (p *PolyClient) pingLoop(conn *websocket.Conn) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			p.writeMu.Lock()
+			err := conn.WriteMessage(websocket.TextMessage, []byte("PING"))
+			p.writeMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (p *PolyClient) closeConn() {
