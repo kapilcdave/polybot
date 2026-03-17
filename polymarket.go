@@ -30,6 +30,7 @@ type PolyClient struct {
 	conn         *websocket.Conn
 	markets      map[string]SportsMarket
 	tokenMap     map[string]tokenMapping
+	byClobToken  map[string]string
 	marketTokens map[string][2]string
 	subscribed   []string
 
@@ -47,6 +48,7 @@ func NewPolyClient() *PolyClient {
 		ctx:          context.Background(),
 		markets:      make(map[string]SportsMarket),
 		tokenMap:     make(map[string]tokenMapping),
+		byClobToken:  make(map[string]string),
 		marketTokens: make(map[string][2]string),
 	}
 }
@@ -60,6 +62,7 @@ func (p *PolyClient) WithContext(ctx context.Context) {
 func (p *PolyClient) FetchSportsMarkets() ([]SportsMarket, error) {
 	collected := make(map[string]SportsMarket)
 	tokenMap := make(map[string]tokenMapping)
+	byClobToken := make(map[string]string)
 	marketTokens := make(map[string][2]string)
 
 	req, err := http.NewRequestWithContext(p.ctx, http.MethodGet, polyGammaAPI+"/markets?active=true&closed=false&limit=1000", nil)
@@ -139,23 +142,26 @@ func (p *PolyClient) FetchSportsMarkets() ([]SportsMarket, error) {
 		}
 
 		market := SportsMarket{
-			Platform:  "POLY",
-			MarketID:  raw.ID,
-			HomeTeam:  home,
-			AwayTeam:  away,
-			League:    league,
-			GameTime:  parseTimeAny(raw.GameStart, raw.EndDate),
-			Question:  raw.Question,
-			YesBid:    normalizePolyPrice(yesPrice),
-			NoBid:     normalizePolyPrice(noPrice),
-			YesAsk:    bestAsk,
-			NoAsk:     maxFloat(0, 1-bestBid),
-			UpdatedAt: time.Now().UTC(),
-			ClosesAt:  parseTimeAny(raw.EndDate, raw.GameStart),
+			Platform:     "POLY",
+			MarketID:     raw.ID,
+			ClobTokenIDs: [2]string{tokenIDs[0], tokenIDs[1]},
+			HomeTeam:     home,
+			AwayTeam:     away,
+			League:       league,
+			GameTime:     parseTimeAny(raw.GameStart, raw.EndDate),
+			Question:     raw.Question,
+			YesBid:       normalizePolyPrice(yesPrice),
+			NoBid:        normalizePolyPrice(noPrice),
+			YesAsk:       bestAsk,
+			NoAsk:        maxFloat(0, 1-bestBid),
+			UpdatedAt:    time.Now().UTC(),
+			ClosesAt:     parseTimeAny(raw.EndDate, raw.GameStart),
 		}
 		collected[market.MarketID] = market
 		tokenMap[tokenIDs[0]] = tokenMapping{MarketID: market.MarketID, Side: "YES"}
 		tokenMap[tokenIDs[1]] = tokenMapping{MarketID: market.MarketID, Side: "NO"}
+		byClobToken[tokenIDs[0]] = market.MarketID
+		byClobToken[tokenIDs[1]] = market.MarketID
 		marketTokens[market.MarketID] = [2]string{tokenIDs[0], tokenIDs[1]}
 	}
 
@@ -167,6 +173,7 @@ func (p *PolyClient) FetchSportsMarkets() ([]SportsMarket, error) {
 	p.mu.Lock()
 	p.markets = collected
 	p.tokenMap = tokenMap
+	p.byClobToken = byClobToken
 	p.marketTokens = marketTokens
 	p.mu.Unlock()
 	return out, nil
@@ -204,9 +211,8 @@ func (p *PolyClient) Subscribe(tokenIDs []string) error {
 	for start := 0; start < len(tokenIDs); start += 100 {
 		end := minInt(start+100, len(tokenIDs))
 		payload := map[string]any{
-			"assets_ids":             tokenIDs[start:end],
-			"type":                   "market",
-			"custom_feature_enabled": true,
+			"assets_ids": tokenIDs[start:end],
+			"type":       "market",
 		}
 		p.writeMu.Lock()
 		err := conn.WriteJSON(payload)
@@ -335,12 +341,17 @@ func (p *PolyClient) applyTokenUpdate(tokenID string, bestBid float64, out chan<
 	}
 
 	p.mu.Lock()
+	marketID, ok := p.byClobToken[tokenID]
+	if !ok {
+		p.mu.Unlock()
+		return
+	}
 	mapping, ok := p.tokenMap[tokenID]
 	if !ok {
 		p.mu.Unlock()
 		return
 	}
-	market, ok := p.markets[mapping.MarketID]
+	market, ok := p.markets[marketID]
 	if !ok {
 		p.mu.Unlock()
 		return
@@ -355,7 +366,7 @@ func (p *PolyClient) applyTokenUpdate(tokenID string, bestBid float64, out chan<
 		market.NoBid = bestBid
 	}
 	market.UpdatedAt = time.Now().UTC()
-	p.markets[mapping.MarketID] = market
+	p.markets[marketID] = market
 	p.mu.Unlock()
 
 	select {

@@ -43,6 +43,8 @@ func LoadConfig(path string) (Config, error) {
 			cfg.PolyAPIKeyID = value
 		case "POLY_API_SECRET":
 			cfg.PolyAPISecret = value
+		case "POLY_PRIVATE_KEY":
+			cfg.PolyPrivateKey = value
 		case "ARB_THRESHOLD":
 			parsed, parseErr := strconv.ParseFloat(value, 64)
 			if parseErr != nil {

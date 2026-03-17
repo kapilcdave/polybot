@@ -8,19 +8,20 @@ import (
 
 // One sports market on one platform
 type SportsMarket struct {
-	Platform  string
-	MarketID  string
-	HomeTeam  string
-	AwayTeam  string
-	League    string
-	GameTime  time.Time
-	Question  string
-	YesBid    float64
-	NoBid     float64
-	YesAsk    float64
-	NoAsk     float64
-	UpdatedAt time.Time
-	ClosesAt  time.Time
+	Platform     string
+	MarketID     string
+	ClobTokenIDs [2]string
+	HomeTeam     string
+	AwayTeam     string
+	League       string
+	GameTime     time.Time
+	Question     string
+	YesBid       float64
+	NoBid        float64
+	YesAsk       float64
+	NoAsk        float64
+	UpdatedAt    time.Time
+	ClosesAt     time.Time
 }
 
 // A matched pair — same game on both platforms
@@ -62,6 +63,7 @@ type Config struct {
 	PolyAPIKey           string
 	PolyAPIKeyID         string
 	PolyAPISecret        string
+	PolyPrivateKey       string
 	ArbThreshold         float64
 }
 

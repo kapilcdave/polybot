@@ -60,22 +60,9 @@ func NewKalshiClient(apiKeyID, pemPath string) (*KalshiClient, error) {
 		return nil, fmt.Errorf("read kalshi private key: %w", err)
 	}
 
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, fmt.Errorf("decode kalshi private key PEM: no PEM block found")
-	}
-
-	var privateKey *rsa.PrivateKey
-	if parsed, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes); parseErr == nil {
-		rsaKey, ok := parsed.(*rsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("kalshi private key is not RSA")
-		}
-		privateKey = rsaKey
-	} else if parsed, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes); parseErr == nil {
-		privateKey = parsed
-	} else {
-		return nil, fmt.Errorf("parse kalshi private key: unsupported key format")
+	privateKey, err := parseRSAPrivateKey(data)
+	if err != nil {
+		return nil, err
 	}
 
 	return &KalshiClient{
@@ -92,6 +79,10 @@ func NewKalshiClient(apiKeyID, pemPath string) (*KalshiClient, error) {
 	}, nil
 }
 
+func (k *KalshiClient) PrivateKey() *rsa.PrivateKey {
+	return k.key
+}
+
 func (k *KalshiClient) WithContext(ctx context.Context) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -105,12 +96,12 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 		next    = make(map[string]SportsMarket)
 	)
 	for page := 0; page < 5; page++ {
-		path := "/trade-api/v2/markets?status=open&limit=200"
+		path := "/markets?status=open&limit=200"
 		if cursor != "" {
 			path += "&cursor=" + cursor
 		}
 
-		resp, err := k.doAuthedGET(path)
+		resp, err := k.doSignedGET(http.MethodGet, path)
 		if err != nil {
 			return nil, fmt.Errorf("[kalshi] fetch sports markets: %w", err)
 		}
@@ -118,15 +109,21 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 		var payload struct {
 			Cursor  string `json:"cursor"`
 			Markets []struct {
-				Ticker       string      `json:"ticker"`
-				Title        string      `json:"title"`
-				SeriesTicker string      `json:"series_ticker"`
-				YesBid       interface{} `json:"yes_bid"`
-				NoBid        interface{} `json:"no_bid"`
-				YesAsk       interface{} `json:"yes_ask"`
-				NoAsk        interface{} `json:"no_ask"`
-				CloseTime    string      `json:"close_time"`
-				Expiration   string      `json:"expiration_time"`
+				Ticker       string          `json:"ticker"`
+				Title        string          `json:"title"`
+				SeriesTicker string          `json:"series_ticker"`
+				EventTicker  string          `json:"event_ticker"`
+				CustomStrike json.RawMessage `json:"custom_strike"`
+				YesBid       interface{}     `json:"yes_bid"`
+				NoBid        interface{}     `json:"no_bid"`
+				YesAsk       interface{}     `json:"yes_ask"`
+				NoAsk        interface{}     `json:"no_ask"`
+				YesBidDollar interface{}     `json:"yes_bid_dollars"`
+				NoBidDollar  interface{}     `json:"no_bid_dollars"`
+				YesAskDollar interface{}     `json:"yes_ask_dollars"`
+				NoAskDollar  interface{}     `json:"no_ask_dollars"`
+				CloseTime    string          `json:"close_time"`
+				Expiration   string          `json:"expiration_time"`
 			} `json:"markets"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -135,8 +132,13 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 		}
 		resp.Body.Close()
 
+		pageMatches := 0
+		if page == 0 && len(payload.Markets) > 0 {
+			log.Printf("[kalshi] sample ticker=%q title=%q series=%q", payload.Markets[0].Ticker, payload.Markets[0].Title, payload.Markets[0].SeriesTicker)
+		}
+
 		for _, raw := range payload.Markets {
-			league := detectLeague(raw.SeriesTicker + " " + raw.Title + " " + raw.Ticker)
+			league := detectLeague(raw.SeriesTicker + " " + raw.Title + " " + raw.Ticker + " " + raw.EventTicker + " " + string(raw.CustomStrike))
 			if league == "" {
 				continue
 			}
@@ -149,16 +151,18 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 				League:    league,
 				GameTime:  parseTimeAny(raw.Expiration, raw.CloseTime),
 				Question:  raw.Title,
-				YesBid:    centsToFloat(raw.YesBid),
-				NoBid:     centsToFloat(raw.NoBid),
-				YesAsk:    centsToFloat(raw.YesAsk),
-				NoAsk:     centsToFloat(raw.NoAsk),
+				YesBid:    firstPositiveFloat(centsToFloat(raw.YesBidDollar), centsToFloat(raw.YesBid)),
+				NoBid:     firstPositiveFloat(centsToFloat(raw.NoBidDollar), centsToFloat(raw.NoBid)),
+				YesAsk:    firstPositiveFloat(centsToFloat(raw.YesAskDollar), centsToFloat(raw.YesAsk)),
+				NoAsk:     firstPositiveFloat(centsToFloat(raw.NoAskDollar), centsToFloat(raw.NoAsk)),
 				UpdatedAt: time.Now().UTC(),
 				ClosesAt:  parseTimeAny(raw.CloseTime, raw.Expiration),
 			}
 			markets = append(markets, market)
 			next[market.MarketID] = market
+			pageMatches++
 		}
+		log.Printf("[kalshi] page=%d returned=%d sports=%d", page+1, len(payload.Markets), pageMatches)
 
 		if payload.Cursor == "" || len(payload.Markets) == 0 {
 			break
@@ -172,17 +176,14 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 	return markets, nil
 }
 
-func (k *KalshiClient) doAuthedGET(path string) (*http.Response, error) {
+func (k *KalshiClient) doSignedGET(method, path string) (*http.Response, error) {
 	var lastErr error
 	for _, base := range kalshiRESTBases {
-		req, err := http.NewRequestWithContext(k.ctx, http.MethodGet, base+strings.TrimPrefix(path, "/trade-api/v2"), nil)
+		req, err := http.NewRequestWithContext(k.ctx, method, base+path, nil)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("User-Agent", "gabagool-sports/1.0")
-		req.Header.Set("Accept", "application/json")
-
-		headers, err := k.authHeaders(http.MethodGet, path)
+		headers, err := k.authHeaders(method, path)
 		if err != nil {
 			return nil, err
 		}
@@ -191,6 +192,8 @@ func (k *KalshiClient) doAuthedGET(path string) (*http.Response, error) {
 				req.Header.Add(key, value)
 			}
 		}
+		req.Header.Set("User-Agent", "gabagool-sports/1.0")
+		req.Header.Set("Accept", "application/json")
 
 		resp, err := k.http.Do(req)
 		if err != nil {
@@ -410,19 +413,44 @@ func (k *KalshiClient) Listen(out chan<- MarketUpdate) {
 }
 
 func (k *KalshiClient) authHeaders(method, path string) (http.Header, error) {
+	return kalshiSignedHeaders(k.apiKeyID, k.key, method, path)
+}
+
+func kalshiSignedHeaders(apiKeyID string, key *rsa.PrivateKey, method, path string) (http.Header, error) {
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	message := timestamp + method + path
+	message := timestamp + strings.ToUpper(method) + path
 	sum := sha256.Sum256([]byte(message))
-	sig, err := rsa.SignPSS(rand.Reader, k.key, crypto.SHA256, sum[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
+	sig, err := rsa.SignPSS(rand.Reader, key, crypto.SHA256, sum[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
 	if err != nil {
 		return nil, fmt.Errorf("sign kalshi request: %w", err)
 	}
 
 	headers := make(http.Header)
-	headers.Set("KALSHI-ACCESS-KEY", k.apiKeyID)
+	headers.Set("KALSHI-ACCESS-KEY", apiKeyID)
 	headers.Set("KALSHI-ACCESS-SIGNATURE", base64.StdEncoding.EncodeToString(sig))
 	headers.Set("KALSHI-ACCESS-TIMESTAMP", timestamp)
 	return headers, nil
+}
+
+func parseRSAPrivateKey(data []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("decode kalshi private key PEM: no PEM block found")
+	}
+
+	if parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		rsaKey, ok := parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("kalshi private key is not RSA")
+		}
+		return rsaKey, nil
+	}
+
+	if parsed, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return parsed, nil
+	}
+
+	return nil, fmt.Errorf("parse kalshi private key: unsupported key format")
 }
 
 func (k *KalshiClient) reconnect() error {
@@ -507,6 +535,15 @@ func centsToFloat(v interface{}) float64 {
 	default:
 		return 0
 	}
+}
+
+func firstPositiveFloat(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func resolvePath(path string) string {
