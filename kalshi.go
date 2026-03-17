@@ -351,15 +351,15 @@ func (k *KalshiClient) Listen(out chan<- MarketUpdate) {
 		}
 
 		var msg struct {
-			MarketTicker string  `json:"market_ticker"`
-			YesBid       int     `json:"yes_bid"`
-			NoBid        int     `json:"no_bid"`
-			YesAsk       int     `json:"yes_ask"`
-			NoAsk        int     `json:"no_ask"`
-			YesBidDollar float64 `json:"yes_bid_dollars"`
-			NoBidDollar  float64 `json:"no_bid_dollars"`
-			YesAskDollar float64 `json:"yes_ask_dollars"`
-			NoAskDollar  float64 `json:"no_ask_dollars"`
+			MarketTicker string      `json:"market_ticker"`
+			YesBid       interface{} `json:"yes_bid"`
+			NoBid        interface{} `json:"no_bid"`
+			YesAsk       interface{} `json:"yes_ask"`
+			NoAsk        interface{} `json:"no_ask"`
+			YesBidDollar interface{} `json:"yes_bid_dollars"`
+			NoBidDollar  interface{} `json:"no_bid_dollars"`
+			YesAskDollar interface{} `json:"yes_ask_dollars"`
+			NoAskDollar  interface{} `json:"no_ask_dollars"`
 		}
 		if err := json.Unmarshal(envelope.Msg, &msg); err != nil {
 			log.Printf("[kalshi] decode ticker message: %v", err)
@@ -376,29 +376,17 @@ func (k *KalshiClient) Listen(out chan<- MarketUpdate) {
 			continue
 		}
 
-		switch {
-		case msg.YesBidDollar > 0:
-			market.YesBid = msg.YesBidDollar
-		case msg.YesBid > 0:
-			market.YesBid = float64(msg.YesBid) / 100
+		if price := firstPositiveFloat(centsToFloat(msg.YesBidDollar), centsToFloat(msg.YesBid)); price > 0 {
+			market.YesBid = price
 		}
-		switch {
-		case msg.NoBidDollar > 0:
-			market.NoBid = msg.NoBidDollar
-		case msg.NoBid > 0:
-			market.NoBid = float64(msg.NoBid) / 100
+		if price := firstPositiveFloat(centsToFloat(msg.NoBidDollar), centsToFloat(msg.NoBid)); price > 0 {
+			market.NoBid = price
 		}
-		switch {
-		case msg.YesAskDollar > 0:
-			market.YesAsk = msg.YesAskDollar
-		case msg.YesAsk > 0:
-			market.YesAsk = float64(msg.YesAsk) / 100
+		if price := firstPositiveFloat(centsToFloat(msg.YesAskDollar), centsToFloat(msg.YesAsk)); price > 0 {
+			market.YesAsk = price
 		}
-		switch {
-		case msg.NoAskDollar > 0:
-			market.NoAsk = msg.NoAskDollar
-		case msg.NoAsk > 0:
-			market.NoAsk = float64(msg.NoAsk) / 100
+		if price := firstPositiveFloat(centsToFloat(msg.NoAskDollar), centsToFloat(msg.NoAsk)); price > 0 {
+			market.NoAsk = price
 		}
 		market.UpdatedAt = time.Now().UTC()
 		k.markets[msg.MarketTicker] = market

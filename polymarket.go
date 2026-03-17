@@ -207,12 +207,19 @@ func (p *PolyClient) Subscribe(tokenIDs []string) error {
 	if conn == nil {
 		return fmt.Errorf("[poly] subscribe: websocket not connected")
 	}
+	if len(tokenIDs) == 0 {
+		return nil
+	}
 
 	for start := 0; start < len(tokenIDs); start += 100 {
 		end := minInt(start+100, len(tokenIDs))
-		payload := map[string]any{
-			"assets_ids": tokenIDs[start:end],
-			"type":       "market",
+		payload := map[string]any{"assets_ids": tokenIDs[start:end]}
+		if start == 0 {
+			payload["type"] = "market"
+			payload["custom_feature_enabled"] = true
+		} else {
+			payload["event_type"] = "subscribe"
+			payload["type"] = "market"
 		}
 		p.writeMu.Lock()
 		err := conn.WriteJSON(payload)
