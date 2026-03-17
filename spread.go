@@ -9,9 +9,11 @@ const (
 )
 
 var activeArbThreshold = ArbThreshold
+var activeKalshiFeePct = KalshiFeePct
+var activePolyFeeFlat = PolyFeeFlat
 
 func kalshiFee(p float64) float64 {
-	return KalshiFeePct * p * (1 - p)
+	return activeKalshiFeePct * p * (1 - p)
 }
 
 func Check(game MatchedGame) []ArbOpportunity {
@@ -19,6 +21,9 @@ func Check(game MatchedGame) []ArbOpportunity {
 	opps := make([]ArbOpportunity, 0, 2)
 
 	if game.GameTime().IsZero() || now.After(game.GameTime()) {
+		return opps
+	}
+	if now.Sub(game.Kalshi.UpdatedAt) > 60*time.Second || now.Sub(game.Poly.UpdatedAt) > 60*time.Second {
 		return opps
 	}
 
@@ -31,7 +36,7 @@ func Check(game MatchedGame) []ArbOpportunity {
 			return
 		}
 		kFee := kalshiFee(kPrice)
-		pFee := pPrice * PolyFeeFlat
+		pFee := pPrice * activePolyFeeFlat
 		gross := 1.0 - combined
 		net := gross - kFee - pFee
 		if net <= 0 {

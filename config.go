@@ -10,7 +10,15 @@ import (
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
-		ArbThreshold: ArbThreshold,
+		ArbThreshold:  ArbThreshold,
+		MinEdgePct:    1 - ArbThreshold,
+		KalshiFeeRate: KalshiFeePct,
+		PolyFeeFlat:   PolyFeeFlat,
+		MaxOrderUSDC:  500,
+		MaxDailyLoss:  200,
+		DryRun:        true,
+		LogPath:       "arbbot.log",
+		JournalPath:   "arb_orders.jsonl",
 	}
 
 	file, err := os.Open(path)
@@ -51,6 +59,48 @@ func LoadConfig(path string) (Config, error) {
 				return cfg, fmt.Errorf("invalid ARB_THRESHOLD %q: %w", value, parseErr)
 			}
 			cfg.ArbThreshold = parsed
+			cfg.MinEdgePct = 1 - parsed
+		case "MIN_EDGE_PCT":
+			parsed, parseErr := strconv.ParseFloat(value, 64)
+			if parseErr != nil {
+				return cfg, fmt.Errorf("invalid MIN_EDGE_PCT %q: %w", value, parseErr)
+			}
+			cfg.MinEdgePct = parsed / 100
+			cfg.ArbThreshold = 1 - cfg.MinEdgePct
+		case "KALSHI_FEE_RATE":
+			parsed, parseErr := strconv.ParseFloat(value, 64)
+			if parseErr != nil {
+				return cfg, fmt.Errorf("invalid KALSHI_FEE_RATE %q: %w", value, parseErr)
+			}
+			cfg.KalshiFeeRate = parsed
+		case "POLY_FEE_FLAT":
+			parsed, parseErr := strconv.ParseFloat(value, 64)
+			if parseErr != nil {
+				return cfg, fmt.Errorf("invalid POLY_FEE_FLAT %q: %w", value, parseErr)
+			}
+			cfg.PolyFeeFlat = parsed
+		case "MAX_ORDER_USDC":
+			parsed, parseErr := strconv.ParseFloat(value, 64)
+			if parseErr != nil {
+				return cfg, fmt.Errorf("invalid MAX_ORDER_USDC %q: %w", value, parseErr)
+			}
+			cfg.MaxOrderUSDC = parsed
+		case "MAX_DAILY_LOSS":
+			parsed, parseErr := strconv.ParseFloat(value, 64)
+			if parseErr != nil {
+				return cfg, fmt.Errorf("invalid MAX_DAILY_LOSS %q: %w", value, parseErr)
+			}
+			cfg.MaxDailyLoss = parsed
+		case "DRY_RUN":
+			cfg.DryRun = value != "false" && value != "0"
+		case "LOG_PATH":
+			if value != "" {
+				cfg.LogPath = value
+			}
+		case "JOURNAL_PATH":
+			if value != "" {
+				cfg.JournalPath = value
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -65,5 +115,7 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	activeArbThreshold = cfg.ArbThreshold
+	activeKalshiFeePct = cfg.KalshiFeeRate
+	activePolyFeeFlat = cfg.PolyFeeFlat
 	return cfg, nil
 }

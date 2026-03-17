@@ -36,6 +36,22 @@ func (d *Display) Render(state DisplayState) {
 	b.WriteString(fmt.Sprintf("┌──────────────────────────────────────────────────────────────────────────────┐\n"))
 	b.WriteString(fmt.Sprintf("│  POLYBOT SPORTS ARB  │  %-12s  │  matched: %-3d games            │\n", state.Now.Format("15:04:05.000"), state.MatchedCount))
 	b.WriteString("└──────────────────────────────────────────────────────────────────────────────┘\n\n")
+	b.WriteString(fmt.Sprintf("EXECUTOR  mode:%-7s  executed:%-4d  skipped:%-4d  pnl:%6s  open:%-2d",
+		execModeText(state.Exec),
+		state.Exec.Executed,
+		state.Exec.Skipped,
+		moneyCell(state.Exec.TodayPnL),
+		state.Exec.OpenPositions,
+	))
+	if state.Exec.Halted {
+		b.WriteString("  " + ansiRed + "HALTED" + ansiReset)
+	}
+	b.WriteString("\n")
+	if state.Exec.Reason != "" {
+		b.WriteString(fmt.Sprintf("reason: %s\n\n", state.Exec.Reason))
+	} else {
+		b.WriteString("\n")
+	}
 	b.WriteString("MATCHED GAMES                    K_YES  K_NO   P_YES  P_NO   K+P_NO  K+P_YES\n")
 	b.WriteString("──────────────────────────────────────────────────────────────────────────────\n")
 
@@ -104,7 +120,7 @@ func (d *Display) Render(state DisplayState) {
 	_, _ = io.WriteString(d.out, b.String())
 }
 
-func buildDisplayState(matcher *GameMatcher, stats *SessionStats, logPath string) DisplayState {
+func buildDisplayState(matcher *GameMatcher, stats *SessionStats, exec *Executor, logPath string) DisplayState {
 	matches := matcher.GetAllMatches()
 	rows := make([]DisplayRow, 0, len(matches))
 	var opps []ArbOpportunity
@@ -138,7 +154,15 @@ func buildDisplayState(matcher *GameMatcher, stats *SessionStats, logPath string
 		Opportunities: opps,
 		OppsSeen:      total,
 		LogPath:       logPath,
+		Exec:          exec.Snapshot(),
 	}
+}
+
+func execModeText(snapshot ExecutorSnapshot) string {
+	if snapshot.Halted {
+		return "HALTED"
+	}
+	return "DRYRUN"
 }
 
 func inlineSpread(v float64) string {
@@ -172,6 +196,10 @@ func truncate(s string, width int) string {
 
 func priceCell(v float64) string {
 	return fmt.Sprintf("%d¢", toCentsInt(v))
+}
+
+func moneyCell(v float64) string {
+	return fmt.Sprintf("$%.2f", v)
 }
 
 func toCentsInt(v float64) int {

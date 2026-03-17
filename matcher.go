@@ -131,6 +131,17 @@ func (m *GameMatcher) GetAllMatches() []MatchedGame {
 func (m *GameMatcher) rebuildMatchesLocked() {
 	m.matched = make(map[string]MatchedGame)
 	usedPoly := make(map[string]struct{})
+	polyByKey := make(map[string][]SportsMarket)
+	polyByBucket := make(map[string][]SportsMarket)
+
+	for _, market := range m.poly {
+		if market.MatchKey != "" {
+			polyByKey[market.MatchKey] = append(polyByKey[market.MatchKey], market)
+		}
+		if market.MatchBucket != "" {
+			polyByBucket[market.MatchBucket] = append(polyByBucket[market.MatchBucket], market)
+		}
+	}
 
 	kalshiMarkets := make([]SportsMarket, 0, len(m.kalshi))
 	for _, market := range m.kalshi {
@@ -148,7 +159,10 @@ func (m *GameMatcher) rebuildMatchesLocked() {
 	})
 
 	for _, market := range kalshiMarkets {
-		match := m.tryMatchLocked(market, usedPoly)
+		match := matchByCanonical(market, polyByKey, polyByBucket, usedPoly)
+		if match == nil {
+			match = m.tryMatchLocked(market, usedPoly)
+		}
 		if match == nil {
 			continue
 		}
@@ -157,28 +171,104 @@ func (m *GameMatcher) rebuildMatchesLocked() {
 	}
 }
 
+func matchByCanonical(kalshi SportsMarket, polyByKey, polyByBucket map[string][]SportsMarket, used map[string]struct{}) *MatchedGame {
+	if kalshi.MatchKey != "" {
+		for _, candidate := range polyByKey[kalshi.MatchKey] {
+			if _, taken := used[candidate.MarketID]; taken {
+				continue
+			}
+			return buildMatchedGame(kalshi, candidate)
+		}
+	}
+	if kalshi.MatchBucket == "" {
+		return nil
+	}
+
+	var best *SportsMarket
+	bestDiff := 48 * time.Hour
+	for _, candidate := range polyByBucket[kalshi.MatchBucket] {
+		if _, taken := used[candidate.MarketID]; taken {
+			continue
+		}
+		diff, ok := matchDateDistance(kalshi, candidate)
+		if !ok {
+			if best == nil {
+				copy := candidate
+				best = &copy
+			}
+			continue
+		}
+		if diff <= 24*time.Hour && (best == nil || diff < bestDiff) {
+			copy := candidate
+			best = &copy
+			bestDiff = diff
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	return buildMatchedGame(kalshi, *best)
+}
+
+func buildMatchedGame(kalshi, poly SportsMarket) *MatchedGame {
+	match := MatchedGame{
+		MatchedAt: time.Now().UTC(),
+		League:    firstNonEmpty(kalshi.League, poly.League),
+		Kalshi:    kalshi,
+		Poly:      poly,
+	}
+	match.HomeTeam = firstNonEmpty(match.Kalshi.HomeTeam, match.Poly.HomeTeam)
+	match.AwayTeam = firstNonEmpty(match.Kalshi.AwayTeam, match.Poly.AwayTeam)
+	return &match
+}
+
 func matchScore(a, b SportsMarket) float64 {
 	if a.League == "" || b.League == "" || a.League != b.League {
 		return 0
 	}
 
-	homeScore := teamSimilarity(a.HomeTeam, b.HomeTeam)
-	awayScore := teamSimilarity(a.AwayTeam, b.AwayTeam)
-	crossScore := (teamSimilarity(a.HomeTeam, b.AwayTeam) + teamSimilarity(a.AwayTeam, b.HomeTeam)) / 2
-	teamScore := math.Max((homeScore+awayScore)/2, crossScore)
+	singleSide := strings.TrimSpace(a.AwayTeam) == "" && strings.TrimSpace(b.AwayTeam) == ""
+	teamScore := 0.0
+	if singleSide {
+		teamScore = teamSimilarity(a.HomeTeam, b.HomeTeam)
+	} else {
+		homeScore := teamSimilarity(a.HomeTeam, b.HomeTeam)
+		awayScore := teamSimilarity(a.AwayTeam, b.AwayTeam)
+		crossScore := (teamSimilarity(a.HomeTeam, b.AwayTeam) + teamSimilarity(a.AwayTeam, b.HomeTeam)) / 2
+		teamScore = math.Max((homeScore+awayScore)/2, crossScore)
+	}
 
 	timeScore := 0.0
-	if !a.GameTime.IsZero() && !b.GameTime.IsZero() {
-		diff := math.Abs(a.GameTime.Sub(b.GameTime).Hours())
-		switch {
-		case diff <= 2:
-			timeScore = 1.0
-		case diff <= 4:
-			timeScore = 0.5
-		case diff <= 6:
-			timeScore = 0.0
-		default:
-			timeScore = 0.0
+	leftTime := a.GameTime
+	if leftTime.IsZero() {
+		leftTime = a.ClosesAt
+	}
+	rightTime := b.GameTime
+	if rightTime.IsZero() {
+		rightTime = b.ClosesAt
+	}
+	if !leftTime.IsZero() && !rightTime.IsZero() {
+		diff := math.Abs(leftTime.Sub(rightTime).Hours())
+		if singleSide {
+			switch {
+			case diff <= 24*14:
+				timeScore = 1.0
+			case diff <= 24*30:
+				timeScore = 0.5
+			default:
+				timeScore = 0.0
+			}
+		} else {
+			switch {
+			case diff <= 2:
+				timeScore = 1.0
+			case diff <= 4:
+				timeScore = 0.5
+			case diff <= 6:
+				timeScore = 0.0
+			default:
+				timeScore = 0.0
+			}
 		}
 	}
 

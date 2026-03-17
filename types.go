@@ -16,6 +16,10 @@ type SportsMarket struct {
 	League       string
 	GameTime     time.Time
 	Question     string
+	MatchType    string
+	MatchDate    string
+	MatchBucket  string
+	MatchKey     string
 	YesBid       float64
 	NoBid        float64
 	YesAsk       float64
@@ -65,6 +69,14 @@ type Config struct {
 	PolyAPISecret        string
 	PolyPrivateKey       string
 	ArbThreshold         float64
+	MinEdgePct           float64
+	KalshiFeeRate        float64
+	PolyFeeFlat          float64
+	MaxOrderUSDC         float64
+	MaxDailyLoss         float64
+	DryRun               bool
+	LogPath              string
+	JournalPath          string
 }
 
 type MarketClient interface {
@@ -87,6 +99,7 @@ type DisplayState struct {
 	Opportunities []ArbOpportunity
 	OppsSeen      int
 	LogPath       string
+	Exec          ExecutorSnapshot
 }
 
 type SessionStats struct {
@@ -133,6 +146,60 @@ func (s *SessionStats) Snapshot() (totalOpps int, bestSpread float64, bestNet fl
 type tokenMapping struct {
 	MarketID string
 	Side     string
+}
+
+type OrderState string
+
+const (
+	StatePending    OrderState = "PENDING"
+	StateLeg1Sent   OrderState = "LEG1_SENT"
+	StateLeg1Filled OrderState = "LEG1_FILLED"
+	StateLeg2Sent   OrderState = "LEG2_SENT"
+	StateComplete   OrderState = "COMPLETE"
+	StateLeg1Failed OrderState = "LEG1_FAILED"
+	StateLeg2Failed OrderState = "LEG2_FAILED"
+	StateSkipped    OrderState = "SKIPPED"
+)
+
+type ArbOrder struct {
+	ID              string     `json:"id"`
+	ArbKey          string     `json:"arb_key"`
+	State           OrderState `json:"state"`
+	DryRun          bool       `json:"dry_run"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	League          string     `json:"league"`
+	HomeTeam        string     `json:"home_team"`
+	AwayTeam        string     `json:"away_team"`
+	Direction       string     `json:"direction"`
+	KalshiTicker    string     `json:"kalshi_ticker"`
+	KalshiSide      string     `json:"kalshi_side"`
+	KalshiPrice     float64    `json:"kalshi_price"`
+	KalshiCount     int        `json:"kalshi_count"`
+	KalshiOrderID   string     `json:"kalshi_order_id,omitempty"`
+	KalshiFillPrice float64    `json:"kalshi_fill_price,omitempty"`
+	PolyMarketID    string     `json:"poly_market_id"`
+	PolyTokenID     string     `json:"poly_token_id"`
+	PolySide        string     `json:"poly_side"`
+	PolyPrice       float64    `json:"poly_price"`
+	PolyStake       float64    `json:"poly_stake"`
+	PolyOrderID     string     `json:"poly_order_id,omitempty"`
+	PolyFillPrice   float64    `json:"poly_fill_price,omitempty"`
+	NetProfit       float64    `json:"net_profit"`
+	FailureReason   string     `json:"failure_reason,omitempty"`
+}
+
+type ExecutorSnapshot struct {
+	Halted        bool
+	Reason        string
+	TotalOpps     int
+	Executed      int
+	Skipped       int
+	Completed     int
+	Leg1Failures  int
+	Leg2Failures  int
+	OpenPositions int
+	TodayPnL      float64
 }
 
 func (m MatchedGame) GameTime() time.Time {

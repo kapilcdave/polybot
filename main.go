@@ -2,20 +2,32 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 )
 
 func main() {
+	flag.BoolVar(&debugMatching, "debug-matching", false, "log canonical seed keys and unmatched parse reasons")
+	flag.Parse()
+
 	startedAt := time.Now()
 	cfg, err := LoadConfig(".env")
 	if err != nil {
 		log.Fatalf("config error: %v", err)
+	}
+	closeLog, err := initFileLogging(cfg.LogPath)
+	if err != nil {
+		log.Printf("logging setup warning: %v", err)
+	} else {
+		defer closeLog()
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -40,6 +52,7 @@ func main() {
 	}
 	log.Printf("[kalshi] discovered %d sports markets", len(kalshiMarkets))
 	log.Printf("[poly] discovered %d sports markets", len(polyMarkets))
+	log.Printf("[config] arb_threshold=%.4f min_edge_pct=%.2f dry_run=%t", cfg.ArbThreshold, cfg.MinEdgePct*100, cfg.DryRun)
 
 	if err := kalshi.Connect(); err != nil {
 		log.Printf("[kalshi] initial websocket connect failed: %v", err)
@@ -65,6 +78,12 @@ func main() {
 		log.Fatalf("logger error: %v", err)
 	}
 	defer loggerCSV.Close()
+	journal, err := OpenOrderJournal(cfg.JournalPath)
+	if err != nil {
+		log.Fatalf("journal error: %v", err)
+	}
+	defer journal.Close()
+	executor := NewExecutor(cfg, NewKalshiOrderClient(cfg.KalshiAPIKeyID, kalshi.PrivateKey()), mustPolyOrderClient(cfg), journal)
 
 	display := NewDisplay()
 	stats := NewSessionStats(startedAt)
@@ -85,7 +104,7 @@ func main() {
 		select {
 		case update := <-updates:
 			matcher.Update(update)
-			processArbs(matcher, stats, loggerCSV)
+			processArbs(ctx, matcher, stats, loggerCSV, executor)
 		case result := <-refreshes:
 			if result.err != nil {
 				log.Printf("%s", result.err)
@@ -102,7 +121,7 @@ func main() {
 				}
 			}
 		case <-renderTicker.C:
-			display.Render(buildDisplayState(matcher, stats, loggerCSV.path))
+			display.Render(buildDisplayState(matcher, stats, executor, loggerCSV.path))
 		case <-ctx.Done():
 			printSummary(matcher, stats)
 			return
@@ -148,7 +167,7 @@ func runMarketRefresh(ctx context.Context, kalshi *KalshiClient, poly *PolyClien
 	}
 }
 
-func processArbs(matcher *GameMatcher, stats *SessionStats, csvLogger *CSVLogger) {
+func processArbs(ctx context.Context, matcher *GameMatcher, stats *SessionStats, csvLogger *CSVLogger, executor *Executor) {
 	matches := matcher.GetAllMatches()
 	for _, match := range matches {
 		for _, arb := range Check(match) {
@@ -156,6 +175,7 @@ func processArbs(matcher *GameMatcher, stats *SessionStats, csvLogger *CSVLogger
 				if err := csvLogger.Log(arb); err != nil {
 					log.Printf("logger error: %v", err)
 				}
+				executor.HandleOpportunity(ctx, arb)
 			}
 		}
 	}
@@ -213,4 +233,25 @@ func minDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+func initFileLogging(path string) (func() error, error) {
+	if strings.TrimSpace(path) == "" {
+		return func() error { return nil }, nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open log file %q: %w", path, err)
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, file))
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	return file.Close, nil
+}
+
+func mustPolyOrderClient(cfg Config) *PolyOrderClient {
+	client, err := NewPolyOrderClient(cfg)
+	if err != nil {
+		log.Fatalf("[poly] order client init: %v", err)
+	}
+	return client
 }

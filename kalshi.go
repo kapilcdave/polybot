@@ -158,6 +158,8 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 				UpdatedAt: time.Now().UTC(),
 				ClosesAt:  parseTimeAny(raw.CloseTime, raw.Expiration),
 			}
+			market, reason := annotateMarketForMatching(market)
+			debugSeedMarket("kalshi", market, reason)
 			markets = append(markets, market)
 			next[market.MarketID] = market
 			pageMatches++
@@ -229,6 +231,14 @@ func parseTeams(title, league string) (home, away string) {
 		if len(parts) == 2 {
 			return normalizeTeamNameWithLeague(parts[0], league), normalizeTeamNameWithLeague(strings.TrimSuffix(parts[1], "?"), league)
 		}
+	case strings.HasPrefix(lower, "will the ") && strings.Contains(lower, " win"):
+		after := strings.TrimPrefix(lower, "will the ")
+		team := strings.SplitN(after, " win", 2)[0]
+		return normalizeTeamNameWithLeague(team, league), ""
+	case strings.HasPrefix(lower, "will ") && strings.Contains(lower, " win"):
+		after := strings.TrimPrefix(lower, "will ")
+		team := strings.SplitN(after, " win", 2)[0]
+		return normalizeTeamNameWithLeague(team, league), ""
 	case strings.Contains(lower, " vs. "):
 		parts := strings.SplitN(lower, " vs. ", 2)
 		return normalizeTeamNameWithLeague(parts[0], league), normalizeTeamNameWithLeague(parts[1], league)

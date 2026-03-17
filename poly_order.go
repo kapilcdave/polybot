@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -154,34 +155,55 @@ func (p *PolyOrderClient) PlaceOrder(ctx context.Context, payload PolySignedOrde
 		return nil, fmt.Errorf("[poly] encode order: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/order", strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "gabagool-sports/1.0")
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-	if p.apiKeyID != "" {
-		req.Header.Set("POLY-API-KEY-ID", p.apiKeyID)
-	}
-	if p.apiSecret != "" {
-		req.Header.Set("POLY-API-SECRET", p.apiSecret)
-	}
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/order", strings.NewReader(string(body)))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "gabagool-sports/1.0")
+		if p.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+p.apiKey)
+		}
+		if p.apiKeyID != "" {
+			req.Header.Set("POLY-API-KEY-ID", p.apiKeyID)
+		}
+		if p.apiSecret != "" {
+			req.Header.Set("POLY-API-SECRET", p.apiSecret)
+		}
 
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return nil, err
+		resp, err := p.http.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+			} else if resp.StatusCode >= 300 {
+				bodyText := strings.TrimSpace(string(respBody))
+				switch resp.StatusCode {
+				case 400, 401, 403, 404:
+					return nil, &nonRetriableOrderError{msg: fmt.Sprintf("[poly] order status=%d body=%s", resp.StatusCode, bodyText)}
+				default:
+					lastErr = fmt.Errorf("[poly] order status=%d body=%s", resp.StatusCode, bodyText)
+				}
+			} else {
+				return respBody, nil
+			}
+		}
+		if attempt < 3 {
+			log.Printf("[poly] order attempt=%d failed: %v", attempt, lastErr)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("[poly] order status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	return respBody, nil
+	return nil, lastErr
 }
 
 func (p *PolyOrderClient) domainSeparatorHash() common.Hash {

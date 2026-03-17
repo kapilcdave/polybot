@@ -64,105 +64,124 @@ func (p *PolyClient) FetchSportsMarkets() ([]SportsMarket, error) {
 	tokenMap := make(map[string]tokenMapping)
 	byClobToken := make(map[string]string)
 	marketTokens := make(map[string][2]string)
+	page := 0
+	offset := 0
+	const pageSize = 500
 
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodGet, polyGammaAPI+"/markets?active=true&closed=false&limit=1000", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "gabagool-sports/1.0")
-	req.Header.Set("Accept", "application/json")
+	for {
+		page++
+		req, err := http.NewRequestWithContext(p.ctx, http.MethodGet, fmt.Sprintf("%s/markets?closed=false&tag_slug=sports&limit=%d&offset=%d", polyGammaAPI, pageSize, offset), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "gabagool-sports/1.0")
+		req.Header.Set("Accept", "application/json")
 
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("[poly] fetch sports markets: %w", err)
-	}
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp, err := p.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("[poly] fetch sports markets: %w", err)
+		}
+		if resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			return nil, fmt.Errorf("[poly] fetch sports markets status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		var payload []struct {
+			ID            string          `json:"id"`
+			Question      string          `json:"question"`
+			Slug          string          `json:"slug"`
+			Active        bool            `json:"active"`
+			Closed        bool            `json:"closed"`
+			EndDate       string          `json:"endDate"`
+			GameStart     string          `json:"gameStartTime"`
+			BestBid       interface{}     `json:"bestBid"`
+			BestAsk       interface{}     `json:"bestAsk"`
+			OutcomePrices json.RawMessage `json:"outcomePrices"`
+			ClobTokenIDs  json.RawMessage `json:"clobTokenIds"`
+			Events        []struct {
+				Title string `json:"title"`
+				Slug  string `json:"slug"`
+			} `json:"events"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("[poly] decode sports markets: %w", err)
+		}
 		resp.Body.Close()
-		return nil, fmt.Errorf("[poly] fetch sports markets status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var payload []struct {
-		ID            string          `json:"id"`
-		Question      string          `json:"question"`
-		Slug          string          `json:"slug"`
-		Active        bool            `json:"active"`
-		Closed        bool            `json:"closed"`
-		EndDate       string          `json:"endDate"`
-		GameStart     string          `json:"gameStartTime"`
-		BestBid       interface{}     `json:"bestBid"`
-		BestAsk       interface{}     `json:"bestAsk"`
-		OutcomePrices json.RawMessage `json:"outcomePrices"`
-		ClobTokenIDs  json.RawMessage `json:"clobTokenIds"`
-		Events        []struct {
-			Title string `json:"title"`
-			Slug  string `json:"slug"`
-		} `json:"events"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		resp.Body.Close()
-		return nil, fmt.Errorf("[poly] decode sports markets: %w", err)
-	}
-	resp.Body.Close()
-
-	for _, raw := range payload {
-		if !raw.Active || raw.Closed {
-			continue
-		}
-		tokenIDs := parseTokenIDs(raw.ClobTokenIDs)
-		if len(tokenIDs) < 2 {
-			continue
+		if len(payload) == 0 {
+			break
 		}
 
-		contextText := raw.Question + " " + raw.Slug
-		for _, event := range raw.Events {
-			contextText += " " + event.Title + " " + event.Slug
+		pageCount := 0
+		for _, raw := range payload {
+			if raw.Closed {
+				continue
+			}
+			tokenIDs := parseTokenIDs(raw.ClobTokenIDs)
+			if len(tokenIDs) < 2 {
+				continue
+			}
+
+			contextText := raw.Question + " " + raw.Slug
+			for _, event := range raw.Events {
+				contextText += " " + event.Title + " " + event.Slug
+			}
+
+			league := detectLeague(contextText)
+			if league == "" && !looksLikeSportsQuestion(contextText, raw.GameStart) {
+				continue
+			}
+			if league == "" {
+				league = inferLeagueFromTeams(contextText)
+			}
+			if league == "" {
+				continue
+			}
+
+			home, away := parseTeams(raw.Question, league)
+			yesPrice, noPrice := parseOutcomePrices(raw.OutcomePrices)
+			bestBid := normalizePolyPrice(floatValue(raw.BestBid))
+			bestAsk := normalizePolyPrice(floatValue(raw.BestAsk))
+			if bestBid > 0 {
+				yesPrice = bestBid
+			}
+			if noPrice == 0 && bestAsk > 0 {
+				noPrice = maxFloat(0, 1-bestAsk)
+			}
+
+			market := SportsMarket{
+				Platform:     "POLY",
+				MarketID:     raw.ID,
+				ClobTokenIDs: [2]string{tokenIDs[0], tokenIDs[1]},
+				HomeTeam:     home,
+				AwayTeam:     away,
+				League:       league,
+				GameTime:     parseTimeAny(raw.GameStart, raw.EndDate),
+				Question:     raw.Question,
+				YesBid:       normalizePolyPrice(yesPrice),
+				NoBid:        normalizePolyPrice(noPrice),
+				YesAsk:       bestAsk,
+				NoAsk:        maxFloat(0, 1-bestBid),
+				UpdatedAt:    time.Now().UTC(),
+				ClosesAt:     parseTimeAny(raw.EndDate, raw.GameStart),
+			}
+			market, reason := annotateMarketForMatching(market)
+			debugSeedMarket("poly", market, reason)
+			collected[market.MarketID] = market
+			tokenMap[tokenIDs[0]] = tokenMapping{MarketID: market.MarketID, Side: "YES"}
+			tokenMap[tokenIDs[1]] = tokenMapping{MarketID: market.MarketID, Side: "NO"}
+			byClobToken[tokenIDs[0]] = market.MarketID
+			byClobToken[tokenIDs[1]] = market.MarketID
+			marketTokens[market.MarketID] = [2]string{tokenIDs[0], tokenIDs[1]}
+			pageCount++
 		}
 
-		league := detectLeague(contextText)
-		if league == "" && !looksLikeSportsQuestion(contextText, raw.GameStart) {
-			continue
+		log.Printf("[poly] page=%d returned=%d sports=%d", page, len(payload), pageCount)
+		offset += len(payload)
+		if len(payload) < pageSize {
+			break
 		}
-		if league == "" {
-			league = inferLeagueFromTeams(contextText)
-		}
-		if league == "" {
-			continue
-		}
-
-		home, away := parseTeams(raw.Question, league)
-		yesPrice, noPrice := parseOutcomePrices(raw.OutcomePrices)
-		bestBid := normalizePolyPrice(floatValue(raw.BestBid))
-		bestAsk := normalizePolyPrice(floatValue(raw.BestAsk))
-		if bestBid > 0 {
-			yesPrice = bestBid
-		}
-		if noPrice == 0 && bestAsk > 0 {
-			noPrice = maxFloat(0, 1-bestAsk)
-		}
-
-		market := SportsMarket{
-			Platform:     "POLY",
-			MarketID:     raw.ID,
-			ClobTokenIDs: [2]string{tokenIDs[0], tokenIDs[1]},
-			HomeTeam:     home,
-			AwayTeam:     away,
-			League:       league,
-			GameTime:     parseTimeAny(raw.GameStart, raw.EndDate),
-			Question:     raw.Question,
-			YesBid:       normalizePolyPrice(yesPrice),
-			NoBid:        normalizePolyPrice(noPrice),
-			YesAsk:       bestAsk,
-			NoAsk:        maxFloat(0, 1-bestBid),
-			UpdatedAt:    time.Now().UTC(),
-			ClosesAt:     parseTimeAny(raw.EndDate, raw.GameStart),
-		}
-		collected[market.MarketID] = market
-		tokenMap[tokenIDs[0]] = tokenMapping{MarketID: market.MarketID, Side: "YES"}
-		tokenMap[tokenIDs[1]] = tokenMapping{MarketID: market.MarketID, Side: "NO"}
-		byClobToken[tokenIDs[0]] = market.MarketID
-		byClobToken[tokenIDs[1]] = market.MarketID
-		marketTokens[market.MarketID] = [2]string{tokenIDs[0], tokenIDs[1]}
 	}
 
 	out := make([]SportsMarket, 0, len(collected))

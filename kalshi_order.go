@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -48,12 +49,25 @@ func (k *KalshiOrderClient) PlaceOrder(ctx context.Context, order KalshiOrderReq
 	}
 
 	var lastErr error
-	for _, base := range kalshiRESTBases {
-		respBody, err := k.doSignedJSON(ctx, http.MethodPost, base, "/portfolio/orders", body)
-		if err == nil {
-			return respBody, nil
+	for attempt := 1; attempt <= 3; attempt++ {
+		for _, base := range kalshiRESTBases {
+			respBody, err := k.doSignedJSON(ctx, http.MethodPost, base, "/portfolio/orders", body)
+			if err == nil {
+				return respBody, nil
+			}
+			if isNonRetriableOrderError(err) {
+				return nil, err
+			}
+			lastErr = err
 		}
-		lastErr = err
+		if attempt < 3 {
+			log.Printf("[kalshi] order attempt=%d failed: %v", attempt, lastErr)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
 	}
 	return nil, lastErr
 }
@@ -85,7 +99,13 @@ func (k *KalshiOrderClient) doSignedJSON(ctx context.Context, method, baseURL, p
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("[kalshi] order status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		bodyText := strings.TrimSpace(string(respBody))
+		switch resp.StatusCode {
+		case 400, 401, 403, 404, 409:
+			return nil, &nonRetriableOrderError{msg: fmt.Sprintf("[kalshi] order status=%d body=%s", resp.StatusCode, bodyText)}
+		default:
+			return nil, fmt.Errorf("[kalshi] order status=%d body=%s", resp.StatusCode, bodyText)
+		}
 	}
 	return respBody, nil
 }
