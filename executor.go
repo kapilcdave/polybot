@@ -32,13 +32,9 @@ func NewExecutor(cfg Config, kalshi *KalshiOrderClient, poly *PolyOrderClient, j
 	e.stats.TodayPnL = journal.TodayPnL()
 	openPositions := journal.OpenPositions()
 	e.stats.OpenPositions = len(openPositions)
-	switch {
-	case len(openPositions) > 0:
+	if len(openPositions) > 0 {
 		e.halted = true
 		e.haltReason = "open positions in journal"
-	case !cfg.DryRun:
-		e.halted = true
-		e.haltReason = "live execution disabled until Polymarket order builder is verified"
 	}
 	if e.halted {
 		e.stats.Halted = true
@@ -78,18 +74,6 @@ func (e *Executor) HandleOpportunity(ctx context.Context, arb ArbOpportunity) {
 	}
 	e.lastByKey[key] = time.Now()
 	e.mu.Unlock()
-
-	if !e.cfg.DryRun {
-		e.mu.Lock()
-		e.stats.Skipped++
-		e.halted = true
-		e.haltReason = "live execution disabled until Polymarket order builder is verified"
-		e.stats.Halted = true
-		e.stats.Reason = e.haltReason
-		e.mu.Unlock()
-		log.Printf("[executor] refusing live execution for %s: %s", arbKey(arb), e.haltReason)
-		return
-	}
 
 	order := buildDryRunOrder(e.cfg, arb)
 	if err := e.journal.Upsert(order); err != nil {
@@ -153,20 +137,30 @@ func buildDryRunOrder(cfg Config, arb ArbOpportunity) ArbOrder {
 }
 
 func kalshiLeg(arb ArbOpportunity) (string, float64) {
-	if arb.BuyYesAt == "KALSHI" {
-		return "yes", arb.YesPrice
+	if arb.Leg1Platform == "KALSHI" {
+		return arb.Leg1Side, arb.Leg1Price
 	}
-	return "no", arb.NoPrice
+	return arb.Leg2Side, arb.Leg2Price
 }
 
 func polyLeg(arb ArbOpportunity) (string, float64, string) {
-	if arb.BuyYesAt == "POLY" {
-		return "yes", arb.YesPrice, arb.Game.Poly.ClobTokenIDs[0]
+	if arb.Leg1Platform == "POLY" {
+		return arb.Leg1Side, arb.Leg1Price, polyTokenForSide(arb.Game.Poly, arb.Leg1Side)
 	}
-	if arb.BuyNoAt == "POLY" {
-		return "no", arb.NoPrice, arb.Game.Poly.ClobTokenIDs[1]
+	if arb.Leg2Platform == "POLY" {
+		return arb.Leg2Side, arb.Leg2Price, polyTokenForSide(arb.Game.Poly, arb.Leg2Side)
 	}
 	return "", 0, ""
+}
+
+func polyTokenForSide(market SportsMarket, side string) string {
+	if side == "yes" {
+		return market.ClobTokenIDs[0]
+	}
+	if side == "no" {
+		return market.ClobTokenIDs[1]
+	}
+	return ""
 }
 
 func kalshiContracts(maxOrderUSDC, price float64) int {

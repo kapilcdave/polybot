@@ -19,8 +19,10 @@ const (
 )
 
 type Display struct {
-	mu  sync.Mutex
-	out io.Writer
+	mu         sync.Mutex
+	out        io.Writer
+	lastSig    string
+	lastRender time.Time
 }
 
 func NewDisplay() *Display {
@@ -30,6 +32,11 @@ func NewDisplay() *Display {
 func (d *Display) Render(state DisplayState) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	sig := displaySignature(state)
+	if sig == d.lastSig && time.Since(d.lastRender) < 10*time.Second {
+		return
+	}
 
 	var b strings.Builder
 	b.WriteString(ansiClear)
@@ -52,7 +59,7 @@ func (d *Display) Render(state DisplayState) {
 	} else {
 		b.WriteString("\n")
 	}
-	b.WriteString("MATCHED GAMES                    K_YES  K_NO   P_YES  P_NO   K+P_NO  K+P_YES\n")
+	b.WriteString("MATCHED GAMES                    K_YES  K_NO   P_YES  P_NO   BEST    EDGE\n")
 	b.WriteString("──────────────────────────────────────────────────────────────────────────────\n")
 
 	rows := append([]DisplayRow(nil), state.Rows...)
@@ -72,15 +79,29 @@ func (d *Display) Render(state DisplayState) {
 	}
 
 	for _, row := range rows {
+		bestCombined := 1.0
+		bestEdge := 0.0
+		if len(row.Opportunities) > 0 {
+			bestCombined = row.Opportunities[0].Combined
+			bestEdge = row.Opportunities[0].NetProfit
+			for _, arb := range row.Opportunities[1:] {
+				if arb.Combined < bestCombined {
+					bestCombined = arb.Combined
+				}
+				if arb.NetProfit > bestEdge {
+					bestEdge = arb.NetProfit
+				}
+			}
+		}
 		line := fmt.Sprintf("[%-5s] %-24s %5s  %5s  %5s  %5s  %6s  %6s",
 			row.Game.League,
 			truncate(fmt.Sprintf("%s vs %s", titleName(row.Game.HomeTeam), titleName(row.Game.AwayTeam)), 24),
-			priceCell(row.Game.Kalshi.YesBid),
-			priceCell(row.Game.Kalshi.NoBid),
-			priceCell(row.Game.Poly.YesBid),
-			priceCell(row.Game.Poly.NoBid),
-			inlineSpread(row.CombinedA),
-			inlineSpread(row.CombinedB),
+			priceCell(row.Game.Kalshi.YesAsk),
+			priceCell(row.Game.Kalshi.NoAsk),
+			priceCell(row.Game.Poly.YesAsk),
+			priceCell(row.Game.Poly.NoAsk),
+			inlineSpread(bestCombined),
+			priceCell(bestEdge),
 		)
 		if len(row.Opportunities) > 0 {
 			line = ansiBold + ansiYellow + line + ansiReset
@@ -98,11 +119,13 @@ func (d *Display) Render(state DisplayState) {
 			b.WriteString(ansiBold + ansiYellow)
 			b.WriteString(fmt.Sprintf("⚡ [%s] %s vs %s\n", arb.Game.League, titleName(arb.Game.HomeTeam), titleName(arb.Game.AwayTeam)))
 			b.WriteString(ansiReset)
-			b.WriteString(fmt.Sprintf("   BUY YES@%s %s + NO@%s %s = %s combined\n",
-				arb.BuyYesAt,
-				priceCell(arb.YesPrice),
-				arb.BuyNoAt,
-				priceCell(arb.NoPrice),
+			b.WriteString(fmt.Sprintf("   BUY %s %s@%s + %s %s@%s = %s combined\n",
+				strings.ToUpper(arb.Leg1Side),
+				titleName(arb.Leg1Team),
+				arb.Leg1Platform,
+				strings.ToUpper(arb.Leg2Side),
+				titleName(arb.Leg2Team),
+				arb.Leg2Platform,
 				priceCell(arb.Combined),
 			))
 			b.WriteString(fmt.Sprintf("   gross: +%s  fees: -%s  NET: +%s/contract\n",
@@ -115,25 +138,28 @@ func (d *Display) Render(state DisplayState) {
 	}
 
 	b.WriteString("──────────────────────────────────────────────────────────────────────────────\n")
-	b.WriteString(fmt.Sprintf("  opps seen: %d  │  csv: %s  │  ctrl+c to exit\n", state.OppsSeen, state.LogPath))
+	b.WriteString(fmt.Sprintf("  opps seen: %d  │  csv: %s  │  log: %s  │  ctrl+c to exit\n", state.OppsSeen, state.CSVPath, state.LogPath))
 
 	_, _ = io.WriteString(d.out, b.String())
+	d.lastSig = sig
+	d.lastRender = time.Now()
 }
 
-func buildDisplayState(matcher *GameMatcher, stats *SessionStats, exec *Executor, logPath string) DisplayState {
+func buildDisplayState(matcher *GameMatcher, stats *SessionStats, exec *Executor, csvPath, logPath string) DisplayState {
 	matches := matcher.GetAllMatches()
 	rows := make([]DisplayRow, 0, len(matches))
 	var opps []ArbOpportunity
 	for _, match := range matches {
 		found := Check(match)
-		combinedA := match.Kalshi.YesBid + match.Poly.NoBid
-		combinedB := match.Kalshi.NoBid + match.Poly.YesBid
-		bestSpread := 1.0 - minFloat(combinedA, combinedB)
+		bestSpread := 0.0
+		for _, arb := range found {
+			if arb.NetProfit > bestSpread {
+				bestSpread = arb.NetProfit
+			}
+		}
 		rows = append(rows, DisplayRow{
 			Game:          match,
 			Opportunities: found,
-			CombinedA:     combinedA,
-			CombinedB:     combinedB,
 			BestSpread:    bestSpread,
 		})
 		opps = append(opps, found...)
@@ -153,9 +179,48 @@ func buildDisplayState(matcher *GameMatcher, stats *SessionStats, exec *Executor
 		Rows:          rows,
 		Opportunities: opps,
 		OppsSeen:      total,
+		CSVPath:       csvPath,
 		LogPath:       logPath,
 		Exec:          exec.Snapshot(),
 	}
+}
+
+func displaySignature(state DisplayState) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "matched=%d|opps=%d|csv=%s|log=%s|halted=%t|reason=%s|exec=%d|skip=%d|complete=%d|open=%d|pnl=%.4f",
+		state.MatchedCount,
+		state.OppsSeen,
+		state.CSVPath,
+		state.LogPath,
+		state.Exec.Halted,
+		state.Exec.Reason,
+		state.Exec.Executed,
+		state.Exec.Skipped,
+		state.Exec.Completed,
+		state.Exec.OpenPositions,
+		state.Exec.TodayPnL,
+	)
+	for _, row := range state.Rows {
+		fmt.Fprintf(&b, "|%s:%s:%s:%.4f:%.4f:%.4f:%.4f",
+			row.Game.League,
+			row.Game.HomeTeam,
+			row.Game.AwayTeam,
+			row.Game.Kalshi.YesAsk,
+			row.Game.Kalshi.NoAsk,
+			row.Game.Poly.YesAsk,
+			row.Game.Poly.NoAsk,
+		)
+	}
+	for _, arb := range state.Opportunities {
+		fmt.Fprintf(&b, "|arb:%s:%s:%s:%.4f:%.4f",
+			arb.Game.League,
+			arb.Game.HomeTeam,
+			arb.Direction,
+			arb.Leg1Price,
+			arb.Leg2Price,
+		)
+	}
+	return b.String()
 }
 
 func execModeText(snapshot ExecutorSnapshot) string {

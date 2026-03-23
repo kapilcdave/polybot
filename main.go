@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -121,7 +120,7 @@ func main() {
 				}
 			}
 		case <-renderTicker.C:
-			display.Render(buildDisplayState(matcher, stats, executor, loggerCSV.path))
+			display.Render(buildDisplayState(matcher, stats, executor, loggerCSV.path, cfg.LogPath))
 		case <-ctx.Done():
 			printSummary(matcher, stats)
 			return
@@ -243,7 +242,7 @@ func initFileLogging(path string) (func() error, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open log file %q: %w", path, err)
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, file))
+	log.SetOutput(file)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	return file.Close, nil
 }

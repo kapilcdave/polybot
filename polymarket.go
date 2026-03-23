@@ -140,6 +140,9 @@ func (p *PolyClient) FetchSportsMarkets() ([]SportsMarket, error) {
 			}
 
 			home, away := parseTeams(raw.Question, league)
+			if home == "" {
+				home, away = parseTeams(contextText, league)
+			}
 			yesPrice, noPrice := parseOutcomePrices(raw.OutcomePrices)
 			bestBid := normalizePolyPrice(floatValue(raw.BestBid))
 			bestAsk := normalizePolyPrice(floatValue(raw.BestAsk))
@@ -168,6 +171,9 @@ func (p *PolyClient) FetchSportsMarkets() ([]SportsMarket, error) {
 			}
 			market, reason := annotateMarketForMatching(market)
 			debugSeedMarket("poly", market, reason)
+			if reason != "" {
+				continue
+			}
 			collected[market.MarketID] = market
 			tokenMap[tokenIDs[0]] = tokenMapping{MarketID: market.MarketID, Side: "YES"}
 			tokenMap[tokenIDs[1]] = tokenMapping{MarketID: market.MarketID, Side: "NO"}
@@ -307,6 +313,10 @@ func (p *PolyClient) TokenIDs() []string {
 }
 
 func (p *PolyClient) handleRaw(raw []byte, out chan<- MarketUpdate) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "PONG" || trimmed == "PING" {
+		return
+	}
 	var list []json.RawMessage
 	if err := json.Unmarshal(raw, &list); err == nil {
 		for _, item := range list {
@@ -326,11 +336,14 @@ func (p *PolyClient) handleMessage(raw json.RawMessage, out chan<- MarketUpdate)
 		EventType string          `json:"event_type"`
 		AssetID   string          `json:"asset_id"`
 		Bids      json.RawMessage `json:"bids"`
+		Asks      json.RawMessage `json:"asks"`
 		BestBid   interface{}     `json:"best_bid"`
+		BestAsk   interface{}     `json:"best_ask"`
 		Changes   []struct {
 			AssetID string      `json:"asset_id"`
 			Price   interface{} `json:"price"`
 			BestBid interface{} `json:"best_bid"`
+			BestAsk interface{} `json:"best_ask"`
 		} `json:"price_changes"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
@@ -341,31 +354,47 @@ func (p *PolyClient) handleMessage(raw json.RawMessage, out chan<- MarketUpdate)
 	switch envelope.EventType {
 	case "price_change":
 		for _, change := range envelope.Changes {
-			price := bestAvailableFloat(change.BestBid, change.Price)
-			if price > 0 {
-				p.applyTokenUpdate(change.AssetID, price, out)
+			bestBid := bestAvailableFloat(change.BestBid, change.Price)
+			bestAsk := floatValue(change.BestAsk)
+			if bestBid > 0 || bestAsk > 0 {
+				p.applyTokenUpdate(change.AssetID, bestBid, bestAsk, out)
 			}
 		}
 	case "book":
 		var bids []struct {
 			Price interface{} `json:"price"`
 		}
+		var asks []struct {
+			Price interface{} `json:"price"`
+		}
 		if err := json.Unmarshal(envelope.Bids, &bids); err != nil {
 			return
 		}
+		if err := json.Unmarshal(envelope.Asks, &asks); err != nil {
+			return
+		}
+		bestBid := 0.0
+		bestAsk := 0.0
 		if len(bids) > 0 {
-			p.applyTokenUpdate(envelope.AssetID, floatValue(bids[0].Price), out)
+			bestBid = floatValue(bids[0].Price)
+		}
+		if len(asks) > 0 {
+			bestAsk = floatValue(asks[0].Price)
+		}
+		if bestBid > 0 || bestAsk > 0 {
+			p.applyTokenUpdate(envelope.AssetID, bestBid, bestAsk, out)
 		}
 	case "best_bid_ask":
-		price := floatValue(envelope.BestBid)
-		if price > 0 {
-			p.applyTokenUpdate(envelope.AssetID, price, out)
+		bestBid := floatValue(envelope.BestBid)
+		bestAsk := floatValue(envelope.BestAsk)
+		if bestBid > 0 || bestAsk > 0 {
+			p.applyTokenUpdate(envelope.AssetID, bestBid, bestAsk, out)
 		}
 	}
 }
 
-func (p *PolyClient) applyTokenUpdate(tokenID string, bestBid float64, out chan<- MarketUpdate) {
-	if tokenID == "" || bestBid <= 0 {
+func (p *PolyClient) applyTokenUpdate(tokenID string, bestBid, bestAsk float64, out chan<- MarketUpdate) {
+	if tokenID == "" || (bestBid <= 0 && bestAsk <= 0) {
 		return
 	}
 
@@ -386,13 +415,20 @@ func (p *PolyClient) applyTokenUpdate(tokenID string, bestBid float64, out chan<
 		return
 	}
 
-	if bestBid > 1 {
-		bestBid = bestBid / 100
-	}
 	if mapping.Side == "YES" {
-		market.YesBid = bestBid
+		if bestBid > 0 {
+			market.YesBid = normalizePolyPrice(bestBid)
+		}
+		if bestAsk > 0 {
+			market.YesAsk = normalizePolyPrice(bestAsk)
+		}
 	} else {
-		market.NoBid = bestBid
+		if bestBid > 0 {
+			market.NoBid = normalizePolyPrice(bestBid)
+		}
+		if bestAsk > 0 {
+			market.NoAsk = normalizePolyPrice(bestAsk)
+		}
 	}
 	market.UpdatedAt = time.Now().UTC()
 	p.markets[marketID] = market
@@ -410,11 +446,7 @@ func (p *PolyClient) reconnect() error {
 	}
 	p.mu.RLock()
 	subs := append([]string(nil), p.subscribed...)
-	conn := p.conn
 	p.mu.RUnlock()
-	if conn != nil {
-		go p.pingLoop(conn)
-	}
 	if len(subs) > 0 {
 		return p.Subscribe(subs)
 	}

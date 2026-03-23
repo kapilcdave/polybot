@@ -113,6 +113,9 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.KalshiPrivateKeyPath == "" {
 		return cfg, fmt.Errorf("missing KALSHI_PRIVATE_KEY_PATH in .env")
 	}
+	if !cfg.DryRun {
+		return cfg, fmt.Errorf("DRY_RUN=false is not supported yet; live execution has not been verified")
+	}
 
 	activeArbThreshold = cfg.ArbThreshold
 	activeKalshiFeePct = cfg.KalshiFeeRate

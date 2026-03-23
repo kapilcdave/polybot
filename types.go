@@ -13,6 +13,7 @@ type SportsMarket struct {
 	ClobTokenIDs [2]string
 	HomeTeam     string
 	AwayTeam     string
+	YesTeam      string
 	League       string
 	GameTime     time.Time
 	Question     string
@@ -40,19 +41,23 @@ type MatchedGame struct {
 
 // A detected arb opportunity
 type ArbOpportunity struct {
-	Game        MatchedGame
-	Direction   string
-	BuyYesAt    string
-	YesPrice    float64
-	BuyNoAt     string
-	NoPrice     float64
-	Combined    float64
-	GrossProfit float64
-	KalshiFee   float64
-	PolyFee     float64
-	NetProfit   float64
-	SeenAt      time.Time
-	ExpiresAt   time.Time
+	Game         MatchedGame
+	Direction    string
+	Leg1Platform string
+	Leg1Side     string
+	Leg1Price    float64
+	Leg1Team     string
+	Leg2Platform string
+	Leg2Side     string
+	Leg2Price    float64
+	Leg2Team     string
+	Combined     float64
+	GrossProfit  float64
+	KalshiFee    float64
+	PolyFee      float64
+	NetProfit    float64
+	SeenAt       time.Time
+	ExpiresAt    time.Time
 }
 
 // Passed on the shared updates channel from both WS clients
@@ -98,6 +103,7 @@ type DisplayState struct {
 	Rows          []DisplayRow
 	Opportunities []ArbOpportunity
 	OppsSeen      int
+	CSVPath       string
 	LogPath       string
 	Exec          ExecutorSnapshot
 }

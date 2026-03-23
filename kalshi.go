@@ -160,6 +160,9 @@ func (k *KalshiClient) FetchSportsMarkets() ([]SportsMarket, error) {
 			}
 			market, reason := annotateMarketForMatching(market)
 			debugSeedMarket("kalshi", market, reason)
+			if reason != "" {
+				continue
+			}
 			markets = append(markets, market)
 			next[market.MarketID] = market
 			pageMatches++
@@ -231,14 +234,6 @@ func parseTeams(title, league string) (home, away string) {
 		if len(parts) == 2 {
 			return normalizeTeamNameWithLeague(parts[0], league), normalizeTeamNameWithLeague(strings.TrimSuffix(parts[1], "?"), league)
 		}
-	case strings.HasPrefix(lower, "will the ") && strings.Contains(lower, " win"):
-		after := strings.TrimPrefix(lower, "will the ")
-		team := strings.SplitN(after, " win", 2)[0]
-		return normalizeTeamNameWithLeague(team, league), ""
-	case strings.HasPrefix(lower, "will ") && strings.Contains(lower, " win"):
-		after := strings.TrimPrefix(lower, "will ")
-		team := strings.SplitN(after, " win", 2)[0]
-		return normalizeTeamNameWithLeague(team, league), ""
 	case strings.Contains(lower, " vs. "):
 		parts := strings.SplitN(lower, " vs. ", 2)
 		return normalizeTeamNameWithLeague(parts[0], league), normalizeTeamNameWithLeague(parts[1], league)
@@ -254,7 +249,7 @@ func parseTeams(title, league string) (home, away string) {
 		return normalizeTeamNameWithLeague(strings.TrimSuffix(lower, " moneyline"), league), ""
 	}
 
-	return normalizeTeamNameWithLeague(lower, league), ""
+	return "", ""
 }
 
 func (k *KalshiClient) Connect() error {
@@ -482,11 +477,18 @@ func normalizeTeamNameWithLeague(name, league string) string {
 }
 
 func detectLeague(value string) string {
-	upper := strings.ToUpper(value)
-	for _, league := range []string{"NBA", "NHL", "MLB", "NCAAB", "NFL"} {
-		if strings.Contains(upper, league) {
-			return league
-		}
+	upper := strings.ToUpper(" " + value + " ")
+	switch {
+	case strings.Contains(upper, " NCAAB "), strings.Contains(upper, " NCAA BASKETBALL "), strings.Contains(upper, " MARCH MADNESS "):
+		return "NCAAB"
+	case strings.Contains(upper, " NBA "):
+		return "NBA"
+	case strings.Contains(upper, " NHL "):
+		return "NHL"
+	case strings.Contains(upper, " MLB "):
+		return "MLB"
+	case strings.Contains(upper, " NFL "):
+		return "NFL"
 	}
 	return ""
 }

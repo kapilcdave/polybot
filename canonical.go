@@ -27,6 +27,9 @@ var (
 
 func annotateMarketForMatching(m SportsMarket) (SportsMarket, string) {
 	m.MatchType = extractMarketType(m.Question)
+	if m.MatchType != "moneyline" {
+		return m, "unsupported market type: " + m.MatchType
+	}
 	m.MatchDate = extractMarketDate(m.Question, m.GameTime, m.ClosesAt)
 
 	teamA := strings.TrimSpace(m.HomeTeam)
@@ -34,14 +37,22 @@ func annotateMarketForMatching(m SportsMarket) (SportsMarket, string) {
 	if teamA == "" {
 		return m, "missing primary team"
 	}
+	if teamB == "" {
+		return m, "missing secondary team"
+	}
+	m.YesTeam = inferYesTeam(m.Question, m.HomeTeam, m.AwayTeam, m.League)
+	if m.YesTeam == "" {
+		return m, "missing yes outcome team"
+	}
+	if !sameNormalizedTeam(m.YesTeam, m.HomeTeam, m.League) && !sameNormalizedTeam(m.YesTeam, m.AwayTeam, m.League) {
+		return m, "yes outcome does not match teams"
+	}
 
 	teams := []string{teamA}
-	if teamB != "" {
-		if teamA == teamB {
-			return m, "duplicate team names"
-		}
-		teams = append(teams, teamB)
+	if teamA == teamB {
+		return m, "duplicate team names"
 	}
+	teams = append(teams, teamB)
 	sort.Strings(teams)
 
 	m.MatchBucket = fmt.Sprintf("%s:%s:%s", strings.ToUpper(strings.TrimSpace(m.League)), strings.Join(teams, ":"), m.MatchType)
@@ -146,4 +157,27 @@ func matchDateDistance(a, b SportsMarket) (time.Duration, bool) {
 		}
 	}
 	return 0, false
+}
+
+func inferYesTeam(title, homeTeam, awayTeam, league string) string {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	switch {
+	case strings.HasPrefix(lower, "will the ") && strings.Contains(lower, " beat "):
+		after := strings.TrimPrefix(lower, "will the ")
+		parts := strings.SplitN(after, " beat ", 2)
+		if len(parts) == 2 {
+			return normalizeTeamNameWithLeague(parts[0], league)
+		}
+	case strings.HasPrefix(lower, "will ") && strings.Contains(lower, " beat "):
+		after := strings.TrimPrefix(lower, "will ")
+		parts := strings.SplitN(after, " beat ", 2)
+		if len(parts) == 2 {
+			return normalizeTeamNameWithLeague(parts[0], league)
+		}
+	}
+	return ""
+}
+
+func sameNormalizedTeam(a, b, league string) bool {
+	return normalizeTeamNameWithLeague(a, league) == normalizeTeamNameWithLeague(b, league)
 }

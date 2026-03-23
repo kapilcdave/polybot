@@ -71,6 +71,12 @@ func (m *GameMatcher) tryMatch(sm SportsMarket) *MatchedGame {
 }
 
 func (m *GameMatcher) tryMatchLocked(sm SportsMarket, used map[string]struct{}) *MatchedGame {
+	if sm.MatchType != "" && sm.MatchType != "moneyline" {
+		return nil
+	}
+	if strings.TrimSpace(sm.HomeTeam) == "" || strings.TrimSpace(sm.AwayTeam) == "" {
+		return nil
+	}
 	candidates := m.poly
 	if sm.Platform == "POLY" {
 		candidates = m.kalshi
@@ -79,6 +85,12 @@ func (m *GameMatcher) tryMatchLocked(sm SportsMarket, used map[string]struct{}) 
 	bestScore := 0.0
 	var best SportsMarket
 	for _, candidate := range candidates {
+		if candidate.MatchType != "" && candidate.MatchType != "moneyline" {
+			continue
+		}
+		if strings.TrimSpace(candidate.HomeTeam) == "" || strings.TrimSpace(candidate.AwayTeam) == "" {
+			continue
+		}
 		if _, taken := used[candidate.MarketID]; taken {
 			continue
 		}
@@ -159,6 +171,9 @@ func (m *GameMatcher) rebuildMatchesLocked() {
 	})
 
 	for _, market := range kalshiMarkets {
+		if market.MatchType != "moneyline" {
+			continue
+		}
 		match := matchByCanonical(market, polyByKey, polyByBucket, usedPoly)
 		if match == nil {
 			match = m.tryMatchLocked(market, usedPoly)
@@ -460,13 +475,18 @@ func matchKey(match MatchedGame) string {
 }
 
 func arbKey(arb ArbOpportunity) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%.4f|%.4f",
+	return fmt.Sprintf("%s|%s|%s|%s:%s:%s:%.4f|%s:%s:%s:%.4f",
 		arb.Game.League,
 		arb.Game.HomeTeam,
 		arb.Game.AwayTeam,
-		arb.Direction,
-		arb.YesPrice,
-		arb.NoPrice,
+		arb.Leg1Platform,
+		arb.Leg1Side,
+		arb.Leg1Team,
+		arb.Leg1Price,
+		arb.Leg2Platform,
+		arb.Leg2Side,
+		arb.Leg2Team,
+		arb.Leg2Price,
 	)
 }
 
